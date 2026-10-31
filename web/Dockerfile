@@ -1,5 +1,5 @@
 # Build stage
-FROM node:20-alpine AS build
+FROM node:24-alpine AS build
 
 WORKDIR /app
 
@@ -8,7 +8,7 @@ ENV VITE_API_KEY=$VITE_API_KEY
 
 COPY package*.json ./
 RUN apk add --no-cache python3 make g++ && \
-    npm install && \
+    npm ci && \
     apk del python3 make g++
 
 COPY . .
