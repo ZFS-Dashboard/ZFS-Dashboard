@@ -1,3 +1,37 @@
+import type { ActiveModule, CustomTab, ModuleMetricPoint, ModuleRun, StoreModule } from './types';
+import { clearModuleCache } from './utils/moduleCache';
+
+export interface ModuleDbSettings {
+  mode: 'internal' | 'external';
+  external: {
+    host: string;
+    port: number;
+    username: string;
+    database: string;
+    has_password: boolean;
+  };
+}
+
+export interface ModuleDbSettingsUpdate {
+  mode: 'internal' | 'external';
+  external?: {
+    host: string;
+    port: number;
+    username: string;
+    database: string;
+    /** omitted = keep stored password, '' = clear it */
+    password?: string;
+  };
+}
+
+export interface ModuleDbTestRequest {
+  host?: string;
+  port?: number;
+  username?: string;
+  database?: string;
+  password?: string;
+}
+
 const API_BASE_URL = '/api/v1';
 let API_KEY = localStorage.getItem('zfs_access_token') || import.meta.env.VITE_API_KEY || '';
 
@@ -106,6 +140,132 @@ export const api = {
     request<{ message: string }>('/settings/password', {
       method: 'POST',
       body: JSON.stringify({ current_password, new_password, confirm_password }),
+    }),
+
+  getGithubInterval: () =>
+    request<{ hours: number }>('/settings/github-interval'),
+
+  setGithubInterval: (hours: number) =>
+    request<{ hours: number }>('/settings/github-interval', {
+      method: 'PUT',
+      body: JSON.stringify({ hours }),
+    }),
+
+  getGithubToken: () =>
+    request<{ configured: boolean }>('/settings/github-token'),
+
+  setGithubToken: (token: string) =>
+    request<{ configured: boolean }>('/settings/github-token', {
+      method: 'PUT',
+      body: JSON.stringify({ token }),
+    }),
+
+  getAccentColor: () =>
+    request<{ color: string }>('/settings/accent-color'),
+
+  setAccentColor: (color: string) =>
+    request<{ color: string }>('/settings/accent-color', {
+      method: 'PUT',
+      body: JSON.stringify({ color }),
+    }),
+
+  // ── Advanced mode ───────────────────────────────────────────────────────────
+  getAdvancedMode: () =>
+    request<{ enabled: boolean }>('/settings/advanced-mode'),
+
+  setAdvancedMode: (enabled: boolean) =>
+    request<{ enabled: boolean }>('/settings/advanced-mode', {
+      method: 'PUT',
+      body: JSON.stringify({ enabled }),
+    }),
+
+  // ── File system (advanced) ──────────────────────────────────────────────────
+  fsList: (path: string) =>
+    request<{ path: string; is_file: boolean; entries?: any[]; size?: number }>(
+      `/advanced/fs?path=${encodeURIComponent(path)}`
+    ),
+
+  fsRead: async (path: string): Promise<string> => {
+    const headers: Record<string, string> = { Accept: 'text/plain' };
+    if (API_KEY) {
+      headers['X-API-Key'] = API_KEY;
+      headers['Authorization'] = `Bearer ${API_KEY}`;
+    }
+    const response = await fetch(`${API_BASE_URL}/advanced/fs/content?path=${encodeURIComponent(path)}`, { headers });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || `Request failed with status ${response.status}`);
+    }
+    return response.text();
+  },
+
+  fsWrite: (path: string, content: string) =>
+    request<{ ok: boolean }>('/advanced/fs/content', {
+      method: 'PUT',
+      body: JSON.stringify({ path, content }),
+    }),
+
+  fsDelete: (path: string) =>
+    request<{ ok: boolean }>(`/advanced/fs?path=${encodeURIComponent(path)}`, {
+      method: 'DELETE',
+    }),
+
+  fsUpload: (path: string, contentBase64: string) =>
+    request<{ ok: boolean; size: number }>('/advanced/fs', {
+      method: 'POST',
+      body: JSON.stringify({ path, content_base64: contentBase64 }),
+    }),
+
+  // ── Database (advanced) ─────────────────────────────────────────────────────
+  dbTables: () =>
+    request<{ tables: string[] }>('/advanced/db/tables'),
+
+  dbTableRows: (name: string, limit = 100, offset = 0) =>
+    request<{ table: string; columns: any[]; pk_columns: string[]; rows: any[]; total: number; limit: number; offset: number }>(
+      `/advanced/db/table/${encodeURIComponent(name)}?limit=${limit}&offset=${offset}`
+    ),
+
+  dbQuery: (sql: string, readOnly = true) =>
+    request<{ columns?: string[]; rows?: any[]; row_count?: number; rows_affected?: number }>(
+      '/advanced/db/query',
+      {
+        method: 'POST',
+        body: JSON.stringify({ sql, read_only: readOnly }),
+      }
+    ),
+
+  dbInsertRow: (table: string, values: Record<string, any>) =>
+    request<{ ok: boolean; rows_affected: number }>(
+      `/advanced/db/table/${encodeURIComponent(table)}/row`,
+      { method: 'POST', body: JSON.stringify({ values }) }
+    ),
+
+  dbUpdateRow: (table: string, values: Record<string, any>, rowId: Record<string, any>) =>
+    request<{ ok: boolean; rows_affected: number }>(
+      `/advanced/db/table/${encodeURIComponent(table)}/row`,
+      { method: 'PUT', body: JSON.stringify({ values, rowId }) }
+    ),
+
+  dbDeleteRow: (table: string, rowId: Record<string, any>) =>
+    request<{ ok: boolean; rows_affected: number }>(
+      `/advanced/db/table/${encodeURIComponent(table)}/row`,
+      { method: 'DELETE', body: JSON.stringify({ rowId }) }
+    ),
+
+  // ── Per-module database settings ───────────────────────────────────────────
+  getModuleDatabase: (id: string) =>
+    request<ModuleDbSettings>(`/modules/${encodeURIComponent(id)}/database`),
+
+  updateModuleDatabase: (id: string, data: ModuleDbSettingsUpdate) =>
+    request<ModuleDbSettings>(`/modules/${encodeURIComponent(id)}/database`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+
+  testModuleDatabase: (id: string, data: ModuleDbTestRequest) =>
+    request<{ ok: boolean; message: string }>(`/modules/${encodeURIComponent(id)}/database/test`, {
+      method: 'POST',
+      body: JSON.stringify(data),
     }),
 
   // ── Pools ──────────────────────────────────────────────────────────────────
@@ -236,6 +396,25 @@ export const api = {
 
   getHealth: () => request<any>('/health'),
 
+  getLatestRelease: () =>
+    request<{ tag_name: string }>('/health/latest-release'),
+
+  refreshModuleStore: () =>
+    request<{ modules: StoreModule[]; errors: Array<{ registry_url: string; error: string }> }>('/modules/store/refresh', {
+      method: 'POST',
+    }),
+
+  discoverRegistry: (url: string) =>
+    request<{
+      input: string;
+      candidates_checked: number;
+      found: Array<{ url: string; modules: any[] }>;
+      invalid: string[];
+    }>('/modules/registries/discover', {
+      method: 'POST',
+      body: JSON.stringify({ url }),
+    }),
+
   // ── Pool Settings ──────────────────────────────────────────────────────────
   getPoolSettings: (name: string) =>
     request<{
@@ -310,6 +489,71 @@ export const api = {
       method: 'POST',
     }),
 
+  // ── Module system ──────────────────────────────────────────────────────────
+  getModuleStore: () =>
+    request<{ modules: StoreModule[]; errors: Array<{ registry_url: string; error: string }> }>('/modules/store'),
+
+  getRegistries: () =>
+    request<{ registries: Array<{ id: number; url: string; is_default: boolean }> }>('/modules/registries'),
+
+  addRegistry: async (url: string) => {
+    const res = await request<{ id: number; url: string }>('/modules/registries', {
+      method: 'POST',
+      body: JSON.stringify({ url }),
+    });
+    clearModuleCache();
+    return res;
+  },
+
+  removeRegistry: async (id: number) => {
+    const res = await request<{ ok: boolean }>(`/modules/registries/${id}`, { method: 'DELETE' });
+    clearModuleCache();
+    return res;
+  },
+
+  getModuleReleases: (repositoryUrl: string) =>
+    request<{ releases: Array<{ tag_name: string; name: string; published_at: string; wasm_url: string }> }>(
+      `/modules/releases?repository_url=${encodeURIComponent(repositoryUrl)}`
+    ),
+
+  installModule: async (registryUrl: string, id: string, version?: string, wasmUrl?: string) => {
+    const res = await request<{ id: string; version: string }>('/modules/install', {
+      method: 'POST',
+      body: JSON.stringify({ registry_url: registryUrl, id, version, wasm_url: wasmUrl }),
+    });
+    clearModuleCache();
+    return res;
+  },
+
+  getActiveModules: () => request<{ modules: ActiveModule[] }>('/modules/active'),
+
+  uninstallModule: async (id: string) => {
+    const res = await request<{ ok: boolean }>(`/modules/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    clearModuleCache();
+    return res;
+  },
+
+  updateModuleConfig: (id: string, config: Record<string, unknown>, secrets: Record<string, string | null>) =>
+    request<{ ok: boolean }>(`/modules/${encodeURIComponent(id)}/config`, {
+      method: 'PUT',
+      body: JSON.stringify({ config, secrets }),
+    }),
+
+  setModuleEnabled: (id: string, enabled: boolean) =>
+    request<{ ok: boolean; enabled: boolean }>(
+      `/modules/${encodeURIComponent(id)}/${enabled ? 'enable' : 'disable'}`,
+      { method: 'POST' },
+    ),
+
+  runModule: (id: string) =>
+    request<{ run_id: number; success: boolean; message: string; metrics_written: number; error: string | null }>(
+      `/modules/${encodeURIComponent(id)}/run`,
+      { method: 'POST' },
+    ),
+
+  getModuleRuns: (id: string, limit = 50) =>
+    request<{ runs: ModuleRun[] }>(`/modules/${encodeURIComponent(id)}/runs?limit=${limit}`),
+
   // ── Per-disk metrics ───────────────────────────────────────────────────────
   getPoolDiskMetrics: (poolName: string) =>
     request<{
@@ -324,4 +568,49 @@ export const api = {
         total_write_gb: number;
       }>;
     }>(`/pools/${encodeURIComponent(poolName)}/disks`),
+
+  // ── Custom Tabs ─────────────────────────────────────────────────────────────
+  getCustomTabs: () => request<{ tabs: CustomTab[] }>('/custom-tabs'),
+  getCustomTab: (slug: string) => request<CustomTab>(`/custom-tabs/${encodeURIComponent(slug)}`),
+  createCustomTab: (name: string, icon = 'layout') =>
+    request<{ id: number; slug: string; name: string; icon: string }>('/custom-tabs', {
+      method: 'POST',
+      body: JSON.stringify({ name, icon }),
+    }),
+  updateCustomTab: (slug: string, data: { name?: string; icon?: string; sort_order?: number }) =>
+    request<{ ok: boolean }>(`/custom-tabs/${encodeURIComponent(slug)}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  deleteCustomTab: (slug: string) =>
+    request<{ ok: boolean }>(`/custom-tabs/${encodeURIComponent(slug)}`, { method: 'DELETE' }),
+  saveCustomTabLayout: (slug: string, layout: any[]) =>
+    request<{ ok: boolean }>(`/custom-tabs/${encodeURIComponent(slug)}/layout`, {
+      method: 'PUT',
+      body: JSON.stringify(layout),
+    }),
+
+  // ── Module Metrics & Actions ──────────────────────────────────────────────
+  getModuleMetrics: (id: string, metric?: string, interval = '1h') =>
+    request<{ module_id: string; metrics: ModuleMetricPoint[] }>(
+      `/modules/${encodeURIComponent(id)}/metrics?interval=${interval}${metric ? `&metric=${encodeURIComponent(metric)}` : ''}`
+    ),
+  pushModuleMetrics: (id: string, metrics: Array<{ metric_name: string; value: number }>) =>
+    request<{ ok: boolean; written: number }>(`/modules/${encodeURIComponent(id)}/metrics`, {
+      method: 'POST',
+      body: JSON.stringify({ metrics }),
+    }),
+  switchModuleVersion: async (id: string, version: string, wasmUrl: string) => {
+    const res = await request<{ ok: boolean; version: string }>(`/modules/${encodeURIComponent(id)}/switch-version`, {
+      method: 'POST',
+      body: JSON.stringify({ version, wasm_url: wasmUrl }),
+    });
+    clearModuleCache();
+    return res;
+  },
+  executeModuleAction: (id: string, actionKey: string) =>
+    request<{ run_id: number; action: string; success: boolean; message: string; metrics_written: number; error: string | null }>(
+      `/modules/${encodeURIComponent(id)}/action/${encodeURIComponent(actionKey)}`,
+      { method: 'POST' },
+    ),
 };

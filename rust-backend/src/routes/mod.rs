@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod clones;
+pub mod custom_tabs;
 pub mod datasets;
 pub mod health;
 pub mod layout;
@@ -11,3 +12,6 @@ pub mod snapshots;
 pub mod stats;
 pub mod volumes;
 pub mod notifications;
+pub mod module_store;
+pub mod modules;
+pub mod advanced;

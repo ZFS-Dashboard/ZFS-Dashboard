@@ -19,12 +19,7 @@ use std::sync::Mutex;
 
 static UI_FIRST_CONTACT: AtomicBool = AtomicBool::new(false);
 
-mod error;
-mod executor;
-mod routes;
-mod state;
-mod startup;
-mod worker;
+use zfs_dashboard::{modules, routes, startup, state, worker};
 
 use state::AppState;
 
@@ -56,9 +51,23 @@ async fn auth_middleware(
 ) -> Result<Response, StatusCode> {
     let path = req.uri().path().to_string();
 
-    // Allow health and login without auth
-    if path.ends_with("/health") || path.ends_with("/auth/login") {
+    // Allow health, login, and accent-color GET without auth (not sensitive)
+    if path.ends_with("/health")
+        || path.ends_with("/auth/login")
+        || (path == "/api/v1/settings/accent-color" && req.method() == axum::http::Method::GET)
+    {
         return Ok(next.run(req).await);
+    }
+
+    // Internal requests from the WASM module sandbox carry a random token
+    // injected by the runtime. This lets modules call dashboard API endpoints
+    // (e.g. /api/v1/disks) without needing a user-provided API key.
+    if let Some(internal) = req.headers().get("x-internal-module") {
+        if let Ok(internal_str) = internal.to_str() {
+            if internal_str == state.internal_module_token.as_str() {
+                return Ok(next.run(req).await);
+            }
+        }
     }
 
     let token_opt = req.headers()
@@ -149,7 +158,17 @@ async fn auth_middleware(
             ).await;
         });
     }
-    warn!("Unauthorized access attempt from {ip}");
+    // Detailed debug logging for 401s — helps diagnose module auth issues
+    let has_x_api_key = req.headers().get("x-api-key").is_some();
+    let has_auth = req.headers().get("authorization").is_some();
+    let has_internal = req.headers().get("x-internal-module").is_some();
+    let ua = req.headers().get("user-agent").and_then(|v| v.to_str().ok()).unwrap_or("");
+    warn!(
+        "Unauthorized access attempt from {ip}: path={path}, method={}, \
+         x-api-key={has_x_api_key}, authorization={has_auth}, x-internal-module={has_internal}, \
+         user-agent={ua:?}",
+        req.method()
+    );
 
     Err(StatusCode::UNAUTHORIZED)
 }
@@ -161,103 +180,30 @@ async fn security_headers(req: Request, next: Next) -> Response {
     h.insert("X-Content-Type-Options", HeaderValue::from_static("nosniff"));
     h.insert("X-Frame-Options",        HeaderValue::from_static("DENY"));
     h.insert("X-XSS-Protection",       HeaderValue::from_static("1; mode=block"));
-    h.insert("Content-Security-Policy", HeaderValue::from_static("default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; img-src * data:;"));
+    h.insert("Content-Security-Policy", HeaderValue::from_static("default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; img-src * data: blob:; font-src * data:; style-src * 'unsafe-inline'; connect-src *;"));
     h.insert("Referrer-Policy",        HeaderValue::from_static("same-origin"));
     res
 }
 
-async fn init_schema(client: &tokio_postgres::Client) {
-    let sql = "
-        CREATE TABLE IF NOT EXISTS zfs_metrics (
-            id BIGSERIAL PRIMARY KEY,
-            collected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            pool_name TEXT NOT NULL DEFAULT '',
-            read_bw_mb DOUBLE PRECISION DEFAULT 0,
-            write_bw_mb DOUBLE PRECISION DEFAULT 0,
-            iops DOUBLE PRECISION DEFAULT 0,
-            alloc_gb DOUBLE PRECISION DEFAULT 0,
-            free_gb DOUBLE PRECISION DEFAULT 0,
-            cpu_percent DOUBLE PRECISION DEFAULT 0,
-            arc_hit_ratio DOUBLE PRECISION DEFAULT 0
-        );
-        CREATE INDEX IF NOT EXISTS idx_zfs_metrics_time ON zfs_metrics(collected_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_zfs_metrics_pool_time ON zfs_metrics(pool_name, collected_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_zfs_metrics_pool_time_asc ON zfs_metrics(pool_name, collected_at ASC);
-        ANALYZE zfs_metrics;
-        CREATE TABLE IF NOT EXISTS ui_layouts (
-            page TEXT PRIMARY KEY,
-            layout TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS users (
-            id SERIAL PRIMARY KEY,
-            username TEXT NOT NULL UNIQUE,
-            password_hash TEXT NOT NULL,
-            is_default_password BOOLEAN NOT NULL DEFAULT TRUE,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS sessions (
-            token_hash TEXT PRIMARY KEY,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '24 hours'
-        );
-        CREATE TABLE IF NOT EXISTS api_keys (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            key_hash TEXT NOT NULL,
-            key_prefix TEXT NOT NULL,
-            permissions TEXT NOT NULL DEFAULT 'read',
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            last_used_at TIMESTAMPTZ
-        );
-        CREATE TABLE IF NOT EXISTS login_attempts (
-            id BIGSERIAL PRIMARY KEY,
-            ip_address TEXT NOT NULL,
-            attempted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            success BOOLEAN NOT NULL DEFAULT FALSE
-        );
-        CREATE TABLE IF NOT EXISTS global_stats (
-            id INTEGER PRIMARY KEY DEFAULT 1,
-            total_read_bytes BIGINT NOT NULL DEFAULT 0,
-            total_write_bytes BIGINT NOT NULL DEFAULT 0,
-            CHECK (id = 1)
-        );
-        CREATE TABLE IF NOT EXISTS notification_channels (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            type TEXT NOT NULL,
-            config JSONB NOT NULL DEFAULT '{}',
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS notification_rules (
-            id SERIAL PRIMARY KEY,
-            name TEXT NOT NULL,
-            trigger_type TEXT NOT NULL,
-            threshold_value DOUBLE PRECISION,
-            channel_ids INTEGER[] NOT NULL DEFAULT '{}',
-            is_active BOOLEAN NOT NULL DEFAULT TRUE,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS notifications (
-            id SERIAL PRIMARY KEY,
-            type TEXT NOT NULL,
-            message TEXT NOT NULL,
-            level TEXT NOT NULL,
-            is_read BOOLEAN NOT NULL DEFAULT FALSE,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS disk_stats (
-            pool_name TEXT NOT NULL,
-            disk_name TEXT NOT NULL,
-            total_read_bytes BIGINT NOT NULL DEFAULT 0,
-            total_write_bytes BIGINT NOT NULL DEFAULT 0,
-            PRIMARY KEY (pool_name, disk_name)
-        );
-    ";
+mod migrations {
+    refinery::embed_migrations!("migrations");
+}
 
-    match client.batch_execute(sql).await {
-        Ok(_) => info!("PostgreSQL schema initialized successfully"),
-        Err(e) => warn!("Failed to initialize PostgreSQL schema: {e}"),
+async fn init_schema(client: &mut tokio_postgres::Client) {
+    match migrations::migrations::runner().run_async(client).await {
+        Ok(report) => {
+            let applied = report.applied_migrations().len();
+            if applied > 0 {
+                info!("PostgreSQL migrations applied: {applied}");
+            } else {
+                info!("PostgreSQL schema up to date");
+            }
+        }
+        Err(e) => warn!("Failed to run PostgreSQL migrations: {e}"),
     }
+    // Keep the planner statistics fresh on the largest table (was part of the
+    // old inline schema init and ran on every startup).
+    let _ = client.batch_execute("ANALYZE zfs_metrics;").await;
 }
 
 async fn seed_admin_user(client: &tokio_postgres::Client, api_key: &str) {
@@ -344,14 +290,14 @@ async fn main() {
         .unwrap_or_else(|_| "postgres://zfs:zfs_secret@127.0.0.1:5432/zfs_metrics".to_string());
 
     let pg_client = match tokio_postgres::connect(&db_url, tokio_postgres::NoTls).await {
-        Ok((client, connection)) => {
+        Ok((mut client, connection)) => {
             tokio::spawn(async move {
                 if let Err(e) = connection.await {
                     warn!("PostgreSQL connection error: {e}");
                 }
             });
             info!("PostgreSQL connected");
-            init_schema(&client).await;
+            init_schema(&mut client).await;
             let admin_password = {
                 let v = std::env::var("ADMIN_PASSWORD").unwrap_or_default();
                 if v.is_empty() {
@@ -455,14 +401,63 @@ async fn main() {
             HashMap::new()
         };
 
+    let module_runtime = match modules::runtime::ModuleRuntime::new() {
+        Ok(rt) => Some(Arc::new(rt)),
+        Err(e) => {
+            warn!("Module runtime unavailable: {e}");
+            None
+        }
+    };
+    let master_key = match modules::secrets::load_master_key() {
+        Ok(key) => {
+            modules::secrets::verify_master_key(&key);
+            Some(key)
+        }
+        Err(e) => {
+            // This should never happen now — load_master_key has a fallback
+            // to an ephemeral in-memory key. But if it somehow does, don't
+            // disable secrets (which causes 500s on save); generate an
+            // ephemeral key instead.
+            warn!("load_master_key returned error: {e} — generating ephemeral key");
+            let mut key = [0u8; 32];
+            use rand::RngCore;
+            rand::rngs::OsRng.fill_bytes(&mut key);
+            Some(key)
+        }
+    };
+    if let Some(ref pg) = pg_client {
+        // Default registry is non-persisted and dynamically served from code/ENV.
+        // Clean up any legacy default registry entries from PostgreSQL.
+        let _ = pg
+            .execute("DELETE FROM module_registries WHERE is_default = TRUE", &[])
+            .await;
+        // Load GitHub token from DB or env var for API auth + private repos
+        modules::github_token::init(Some(pg)).await;
+        // Load accent color into in-memory cache
+        routes::settings::init_accent_color_cache(pg).await;
+        // Migrate any existing on-disk WASM artifacts into PostgreSQL
+        startup::migrate_wasm_to_db(pg).await;
+    }
+
+    // Generate a random internal token for WASM module → dashboard API auth.
+    // This token is injected into every HTTP request made by a running module
+    // and recognized by the auth middleware to bypass session/API-key checks.
+    let internal_module_token: String = {
+        use rand::Rng;
+        (0..64).map(|_| rand::thread_rng().sample(rand::distributions::Alphanumeric) as char).collect()
+    };
+
     let app_state = AppState {
         redis: redis_conn,
         pg: pg_client,
         rate_limit,
+        module_runtime,
+        master_key,
         total_read_bytes: Arc::new(AtomicU64::new(init_read)),
         total_write_bytes: Arc::new(AtomicU64::new(init_write)),
         io_cache: Arc::new(tokio::sync::RwLock::new(state::CachedIoSnapshot::default())),
         disk_cumulative: Arc::new(tokio::sync::RwLock::new(init_disk_cumulative)),
+        internal_module_token: Arc::new(internal_module_token),
     };
 
     // Startup: warm Redis from PostgreSQL before worker loops
@@ -470,6 +465,7 @@ async fn main() {
     worker::warm_list_caches(&app_state).await;
 
     tokio::spawn(worker::run_metrics_worker(app_state.clone()));
+    tokio::spawn(modules::scheduler::run_module_scheduler(app_state.clone()));
 
     let cors = {
         let origin = std::env::var("CORS_ORIGIN").unwrap_or_default();
@@ -488,8 +484,8 @@ async fn main() {
         }
     };
 
-    let app = Router::new()
-        .merge(routes::health::router())
+    let api = Router::new()
+        .merge(routes::health::router(app_state.clone()))
         .merge(routes::auth::router(app_state.clone()))
         .merge(routes::settings::router(app_state.clone()))
         .merge(routes::pools::router(app_state.clone()))
@@ -502,7 +498,35 @@ async fn main() {
         .merge(routes::metrics::router(app_state.clone()))
         .merge(routes::layout::router(app_state.clone()))
         .merge(routes::notifications::router(app_state.clone()))
-        .layer(middleware::from_fn_with_state(app_state.clone(), auth_middleware))
+        .merge(routes::module_store::router(app_state.clone()))
+        .merge(routes::modules::router(app_state.clone()))
+        .merge(routes::custom_tabs::router(app_state.clone()))
+        .merge(routes::advanced::router(app_state.clone()))
+        .layer(middleware::from_fn_with_state(app_state.clone(), auth_middleware));
+
+    // Serve the built frontend from the same process (single-container setup).
+    // Unknown paths fall back to index.html for client-side routing.
+    let static_dir = std::env::var("ZFS_STATIC_DIR")
+        .unwrap_or_else(|_| "/usr/share/zfs-dashboard/web".to_string());
+    let index_path = std::path::Path::new(&static_dir).join("index.html");
+    let app = match std::fs::read_to_string(&index_path) {
+        Ok(index_html) => {
+            info!("Serving frontend from {static_dir}");
+            // Unknown non-file paths (SPA client routes) get index.html.
+            let spa_fallback = axum::routing::get(move || {
+                let html = index_html.clone();
+                async move { axum::response::Html(html) }
+            });
+            api.fallback_service(
+                tower_http::services::ServeDir::new(&static_dir).fallback(spa_fallback),
+            )
+        }
+        Err(_) => {
+            info!("No frontend found at {static_dir} — serving API only");
+            api
+        }
+    };
+    let app = app
         .layer(middleware::from_fn(security_headers))
         .layer(cors)
         .layer(TraceLayer::new_for_http());
@@ -511,7 +535,7 @@ async fn main() {
         .await
         .expect("Failed to bind port");
 
-    info!("zfs-manager service listening on http://0.0.0.0:{port}");
+    info!("zfs-dashboard service listening on http://0.0.0.0:{port}");
     info!("   API base: http://0.0.0.0:{port}/api/v1");
     if std::env::var("ZFS_API_KEY").is_ok() {
         info!("API Key Authentication enabled!");

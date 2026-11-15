@@ -1,86 +1,81 @@
 services:
-  redis:
-    image: redis:7-alpine
-    container_name: zfs-redis
+  zfs-dashboard:
+    image: ghcr.io/zfs-dashboard/zfs-dashboard:feature-module-system
+    container_name: zfs-dashboard
     restart: unless-stopped
+    stop_signal: SIGINT
+    privileged: true
+    ports:
+      - "${ZFS_WEB_PORT:-8080}:3000"
+    environment:
+      - ZFS_API_PORT=3000
+      - RUST_LOG=info
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+      - REDIS_URL=redis://zfs-dashboard-redis:6379
+      - DATABASE_URL=postgres://zfs:${POSTGRES_PASSWORD:-zfs_secret}@zfs-dashboard-postgres:5432/zfs_metrics
+      - ZFS_SECRETS_MASTER_KEY=${ZFS_SECRETS_MASTER_KEY:-}
     volumes:
-      - redis_data:/data
+      - /dev:/dev
+      - /proc:/proc:ro
+      - /sys/module/zfs:/sys/module/zfs:ro
+      - /var/lib/zfs:/var/lib/zfs:ro
+      - /home/zfs-dashboard:/app
     healthcheck:
-      test: [ "CMD", "redis-cli", "ping" ]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-      start_period: 5s
+      test: [ "CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/v1/health" ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    depends_on:
+      zfs-dashboard-redis:
+        condition: service_healthy
+      zfs-dashboard-postgres:
+        condition: service_healthy
+    networks:
+      - zfs-dashboard
 
-  postgres:
+  zfs-dashboard-postgres:
     image: postgres:16-alpine
-    container_name: zfs-postgres
+    container_name: zfs-dashboard-postgres
     restart: unless-stopped
     environment:
       - POSTGRES_DB=zfs_metrics
       - POSTGRES_USER=zfs
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-zfs_secret}
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - /home/zfs-dashboard/postgres:/var/lib/postgresql/data
     healthcheck:
       test: [ "CMD-SHELL", "pg_isready -U zfs -d zfs_metrics" ]
       interval: 5s
       timeout: 3s
       retries: 15
       start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    networks:
+      - zfs-dashboard
 
-  zfs-backend:
-    image: zfs-manager-backend:local
-    container_name: zfs-backend
+  zfs-dashboard-redis:
+    image: redis:7-alpine
+    container_name: zfs-dashboard-redis
     restart: unless-stopped
-    stop_signal: SIGINT
-    ports:
-      - "${ZFS_BACKEND_PORT:-3000}:3000"
-    environment:
-      - ZFS_API_PORT=3000
-      - RUST_LOG=info
-      - ZFS_MANAGER_DATA=/home/docker/zfs-manager
-      - ZFS_API_KEY=${ZFS_API_KEY:-admin123}
-      - REDIS_URL=redis://zfs-redis:6379
-      - DATABASE_URL=postgres://zfs:${POSTGRES_PASSWORD:-zfs_secret}@zfs-postgres:5432/zfs_metrics
-    privileged: true
     volumes:
-      - /dev:/dev
-      - /proc:/proc:ro
-      - /sys/module/zfs:/sys/module/zfs:ro
-      - /var/lib/zfs:/var/lib/zfs:ro
-      - type: bind
-        source: /mnt
-        target: /mnt
-        bind:
-          propagation: rshared
-      - /home/docker/zfs-manager:/home/docker/zfs-manager
-    working_dir: /home/docker/zfs-manager
-    depends_on:
-      redis:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
+      - /home/zfs-dashboard/redis:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    networks:
+      - zfs-dashboard
 
-  zfs-web:
-    image: zfs-manager-web:local
-    container_name: zfs-web
-    restart: unless-stopped
-    ports:
-      - "${ZFS_WEB_PORT:-8080}:80"
-    stop_signal: SIGQUIT
-    command: >
-      sh -c "
-        echo '🚀 Starting Web Container Diagnostic...' &&
-        if getent hosts zfs-backend; then echo '  ✅ Network: zfs-backend is resolvable'; else echo '  ❌ Network: zfs-backend NOT found'; fi &&
-        sed -i 's/admin123/${ZFS_API_KEY:-admin123}/g' /usr/share/nginx/html/assets/*.js &&
-        echo '  ✅ Injection: API Key replacement finished' &&
-        echo '🏁 Web Diagnostic finished. Starting Nginx...' &&
-        exec nginx -g 'daemon off;'
-      "
-    depends_on:
-      - zfs-backend
-
-volumes:
-  redis_data:
-  postgres_data:
+networks:
+  zfs-dashboard:
+    name: zfs-dashboard

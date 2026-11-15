@@ -1,9 +1,14 @@
-use axum::{routing::get, Json, Router};
+use axum::{extract::State, routing::get, Json, Router};
 use serde_json::{json, Value};
 use tokio::process::Command;
 
-pub fn router() -> Router {
-    Router::new().route("/api/v1/health", get(health))
+use crate::state::AppState;
+
+pub fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/api/v1/health", get(health))
+        .route("/api/v1/health/latest-release", get(latest_release))
+        .with_state(state)
 }
 
 async fn run_git_cmd(args: &[&str]) -> Option<String> {
@@ -41,7 +46,7 @@ async fn health() -> Json<Value> {
     }
 
     // 5. Upstream commit hash (original repository)
-    let upstream_hash = run_git_cmd(&["ls-remote", "https://github.com/Panda260/ZFS-Manager.git", "refs/heads/main"])
+    let upstream_hash = run_git_cmd(&["ls-remote", "https://github.com/ZFS-Dashboard/ZFS-Dashboard.git", "refs/heads/main"])
         .await
         .and_then(|output| {
             output.split_whitespace().next().map(|s| s.to_string())
@@ -69,7 +74,7 @@ async fn health() -> Json<Value> {
 
     Json(json!({
         "status": "ok",
-        "service": "zfs-manager",
+        "service": "zfs-dashboard",
         "version": env!("CARGO_PKG_VERSION"),
         "git": {
             "local_hash": local_hash,
@@ -82,4 +87,19 @@ async fn health() -> Json<Value> {
             "upstream_status": upstream_status,
         }
     }))
+}
+
+/// Returns the latest GitHub release tag for the ZFS-Dashboard repo.
+/// Uses the same Redis-backed cache as the module store — no direct
+/// GitHub API call on every request. The cache is refreshed every 6h
+/// by the background scheduler or when the Store Refresh button is clicked.
+async fn latest_release(
+    State(state): State<AppState>,
+) -> Json<Value> {
+    let tag = crate::modules::github_cache::get_latest_release(
+        &state.redis,
+        "https://github.com/ZFS-Dashboard/ZFS-Dashboard",
+    )
+    .await;
+    Json(json!({ "tag_name": tag }))
 }

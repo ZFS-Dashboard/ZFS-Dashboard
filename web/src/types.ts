@@ -96,3 +96,116 @@ export interface DiskStat {
   write: number;
   iops: number;
 }
+
+// ── Module system ────────────────────────────────────────────────────────────
+export interface StoreModule {
+  id: string;
+  name: string;
+  version: string;
+  author: string;
+  description: string;
+  icon: string;
+  repository_url: string;
+  registry_url: string;
+  installed: boolean;
+  installed_version?: string;
+}
+
+export interface ModuleConfigField {
+  key: string;
+  label: string;
+  type: 'text' | 'textarea' | 'url' | 'secret' | 'number' | 'select' | 'multiselect' | 'schedule';
+  required?: boolean;
+  default?: unknown;
+  options?: string[];
+  description?: string;
+}
+
+export interface ModuleLastRun {
+  started_at: string;
+  finished_at: string | null;
+  success: boolean | null;
+  message: string | null;
+}
+
+export interface WidgetDefinition {
+  key: string;
+  label: string;
+  type: 'stat' | 'line' | 'bar' | 'gauge' | 'table';
+  metrics: string[];
+  unit?: string;
+  color?: string;
+  description?: string;
+}
+
+export interface StatusField {
+  key: string;
+  label: string;
+  metric?: string;
+  unit?: string;
+  format?: string;
+}
+
+export interface ModuleAction {
+  key: string;
+  label: string;
+  icon?: string;
+  description?: string;
+}
+
+export interface CustomTabWidgetPlacement {
+  id: string;
+  module_id: string;
+  widget_key: string;
+  title?: string;
+  visible?: boolean;
+  order?: number;
+  width?: 'full' | 'half' | 'third';
+}
+
+export interface CustomTab {
+  id: number;
+  name: string;
+  slug: string;
+  icon: string;
+  sort_order: number;
+  layout: CustomTabWidgetPlacement[];
+  created_at: string;
+}
+
+export interface ModuleMetricPoint {
+  metric_name: string;
+  value: number;
+  collected_at: string;
+}
+
+export interface ActiveModule {
+  id: string;
+  name: string;
+  version: string;
+  author: string;
+  description: string;
+  icon: string;
+  repository_url: string;
+  source: 'registry' | 'sideload';
+  registry_url: string | null;
+  enabled: boolean;
+  installed_at: string;
+  config_schema: ModuleConfigField[];
+  widget_schema?: WidgetDefinition[];
+  status_fields?: StatusField[];
+  actions?: ModuleAction[];
+  config: Record<string, unknown>;
+  secret_keys_set: string[];
+  last_run: ModuleLastRun | null;
+}
+
+export interface ModuleRun {
+  id: number;
+  started_at: string;
+  finished_at: string | null;
+  success: boolean | null;
+  message: string;
+  metrics_written: number;
+  trigger: 'schedule' | 'manual';
+}

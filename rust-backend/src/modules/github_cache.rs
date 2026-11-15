@@ -1,0 +1,488 @@
+//! Redis-backed cache for GitHub API responses.
+//!
+//! GitHub's unauthenticated rate limit is 60 requests/hour per IP.
+//! All GitHub API calls in this codebase go through this cache so the
+//! server makes at most one call per repo per TTL period (6 hours),
+//! regardless of how many users or page reloads happen.
+
+use redis::AsyncCommands;
+use serde_json::{json, Value};
+use std::time::Duration;
+use tracing::{debug, warn};
+
+/// Cache TTL — how long a cached GitHub response is considered fresh.
+pub const CACHE_TTL: u64 = 6 * 3600; // 6 hours
+
+/// In-memory fallback when Redis is unavailable.
+/// Key: "latest:{owner}/{repo}" or "releases:{owner}/{repo}"
+static MEM_CACHE: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+fn mem_fresh(key: &str) -> Option<String> {
+    if let Ok(cache) = MEM_CACHE.lock() {
+        if let Some((val, fetched_at)) = cache.get(key) {
+            if fetched_at.elapsed().as_secs() < CACHE_TTL {
+                return Some(val.clone());
+            }
+        }
+    }
+    None
+}
+
+fn mem_set(key: &str, val: &str) {
+    if let Ok(mut cache) = MEM_CACHE.lock() {
+        cache.insert(key.to_string(), (val.to_string(), std::time::Instant::now()));
+    }
+}
+
+fn mem_invalidate(prefix: &str) {
+    if let Ok(mut cache) = MEM_CACHE.lock() {
+        cache.retain(|k, _| !k.starts_with(prefix));
+    }
+}
+
+fn redis_key_latest(owner: &str, repo: &str) -> String {
+    format!("github:latest:{owner}/{repo}")
+}
+
+fn redis_key_releases(owner: &str, repo: &str) -> String {
+    format!("github:releases:{owner}/{repo}")
+}
+
+/// Parses owner and repo from a GitHub repository URL.
+/// Returns `None` if the URL is not a valid GitHub repo URL.
+pub fn parse_github_repo(url: &str) -> Option<(String, String)> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    if parsed.host_str() != Some("github.com") {
+        return None;
+    }
+    let segments: Vec<&str> = parsed.path_segments().map(|c| c.collect()).unwrap_or_default();
+    if segments.len() < 2 {
+        return None;
+    }
+    let owner = segments[0].to_string();
+    let repo = segments[1].trim_end_matches(".git").to_string();
+    Some((owner, repo))
+}
+
+/// Parses a GitHub release download URL like:
+///   https://github.com/{owner}/{repo}/releases/download/{tag}/{asset_name}
+/// Returns (owner, repo, tag, asset_name) if it matches, None otherwise.
+pub fn parse_github_release_download_url(url: &str) -> Option<(String, String, String, String)> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    if parsed.host_str() != Some("github.com") {
+        return None;
+    }
+    let segments: Vec<&str> = parsed.path_segments().map(|c| c.collect()).unwrap_or_default();
+    // Expected: [owner, repo, "releases", "download", tag, asset_name]
+    if segments.len() != 6 || segments[2] != "releases" || segments[3] != "download" {
+        return None;
+    }
+    Some((
+        segments[0].to_string(),
+        segments[1].to_string(),
+        segments[4].to_string(),
+        segments[5].to_string(),
+    ))
+}
+
+/// Downloads a GitHub release asset for a private repo in a single function.
+///
+/// For private repos, the `github.com/.../releases/download/...` URL doesn't
+/// work with Bearer token auth. Instead, we use the GitHub API:
+///   1. GET /repos/{owner}/{repo}/releases/tags/{tag} with Accept: application/vnd.github+json
+///      → find the asset ID by matching the asset name
+///   2. GET /repos/{owner}/{repo}/releases/assets/{asset_id} with Accept: application/octet-stream
+///      → GitHub returns a 302 redirect to a pre-signed URL on objects.githubusercontent.com
+///   3. Follow the redirect manually (preserving auth on GitHub hosts, checking SSRF)
+///   4. Download the binary content
+///
+/// Doing both API calls in one function avoids GitHub's secondary rate limit
+/// which triggers when multiple rapid API calls are made from separate contexts.
+///
+/// Returns the downloaded bytes, or None if anything fails.
+pub async fn download_github_asset(
+    download_url: &str,
+    auth_header: &Option<(String, String)>,
+    max_bytes: usize,
+) -> Option<Vec<u8>> {
+    let (owner, repo, tag, asset_name) = parse_github_release_download_url(download_url)?;
+
+    // Client with redirects disabled so we can preserve the Authorization
+    // header across GitHub's cross-host redirects (api.github.com → objects.githubusercontent.com)
+    let client = reqwest::Client::builder()
+        .user_agent("ZFS-Dashboard")
+        .timeout(std::time::Duration::from_secs(60))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .ok()?;
+
+    // Step 1: Get release metadata to find the asset ID
+    let api_url = format!("https://api.github.com/repos/{owner}/{repo}/releases/tags/{tag}");
+    let mut req = client.get(&api_url)
+        .header("Accept", "application/vnd.github+json");
+    if let Some((ref k, ref v)) = auth_header {
+        req = req.header(k, v);
+    }
+
+    let resp = req.send().await.ok()?;
+    if !resp.status().is_success() {
+        tracing::warn!(
+            "download_github_asset: API metadata call to {} returned {}",
+            api_url, resp.status()
+        );
+        return None;
+    }
+
+    let release: serde_json::Value = resp.json().await.ok()?;
+    let assets = release.get("assets").and_then(|v| v.as_array())?;
+
+    let asset_id = assets.iter().find_map(|a| {
+        let name = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if name == asset_name {
+            a.get("id").and_then(|v| v.as_u64())
+        } else {
+            None
+        }
+    })?;
+
+    tracing::info!(
+        "download_github_asset: found asset {} (id={}) in release {}",
+        asset_name, asset_id, tag
+    );
+
+    // Step 2: Download the asset binary via the API asset endpoint
+    let asset_api_url = format!(
+        "https://api.github.com/repos/{owner}/{repo}/releases/assets/{asset_id}"
+    );
+
+    let mut current_url = asset_api_url;
+    for _ in 0..6 {
+        let parsed = reqwest::Url::parse(&current_url).ok()?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return None;
+        }
+
+        // SSRF protection: reject internal/private network targets
+        let host = parsed.host_str().unwrap_or("");
+        if host.ends_with("github.com") || host.ends_with("githubusercontent.com") {
+            // GitHub hosts are always allowed
+        } else {
+            // Non-GitHub redirect target — reject for safety
+            tracing::warn!("download_github_asset: refusing non-GitHub redirect to {}", host);
+            return None;
+        }
+
+        let mut req = client.get(parsed.as_str());
+        // Add auth for all GitHub hosts
+        if let Some((ref k, ref v)) = auth_header {
+            req = req.header(k, v);
+        }
+        // API asset endpoint needs octet-stream to return binary (otherwise returns JSON metadata)
+        if host == "api.github.com" {
+            req = req.header("Accept", "application/octet-stream");
+        }
+
+        let resp = req.send().await.ok()?;
+        let status = resp.status();
+
+        if status.is_success() {
+            let bytes = resp.bytes().await.ok()?;
+            if bytes.len() > max_bytes {
+                tracing::warn!("download_github_asset: asset {} exceeds {} bytes", asset_name, max_bytes);
+                return None;
+            }
+            tracing::info!("download_github_asset: downloaded {} bytes", bytes.len());
+            return Some(bytes.to_vec());
+        } else if status.is_redirection() {
+            let location = resp.headers().get("location")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())?;
+            tracing::debug!("download_github_asset: following redirect to {}", location);
+            current_url = if location.starts_with("http://") || location.starts_with("https://") {
+                location
+            } else {
+                parsed.join(&location).map(|u| u.to_string()).unwrap_or(location)
+            };
+        } else {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                "download_github_asset: download from {} returned {}: {}",
+                current_url, status, &body[..body.len().min(300)]
+            );
+            return None;
+        }
+    }
+
+    tracing::warn!("download_github_asset: too many redirects");
+    None
+}
+
+/// Fetches the latest release tag_name for a GitHub repo.
+/// CACHE-ONLY: reads from Redis or in-memory cache. Never calls GitHub API
+/// directly — the background scheduler populates the cache periodically.
+/// Returns empty string if not cached.
+pub async fn get_latest_release(
+    redis: &Option<redis::aio::ConnectionManager>,
+    repository_url: &str,
+) -> String {
+    let Some((owner, repo)) = parse_github_repo(repository_url) else {
+        return String::new();
+    };
+
+    let rkey = redis_key_latest(&owner, &repo);
+    let mkey = format!("latest:{owner}/{repo}");
+
+    // 1. Check Redis (with timeout to avoid hanging on slow Redis)
+    if let Some(ref conn) = redis {
+        let mut c = conn.clone();
+        if let Ok(val) = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            c.get::<_, Option<String>>(&rkey),
+        ).await {
+            if let Ok(Some(v)) = val {
+                return v;
+            }
+        }
+    }
+
+    // 2. Check in-memory fallback
+    if let Some(v) = mem_fresh(&mkey) {
+        return v;
+    }
+
+    // Not cached — return empty. The scheduler will populate it.
+    String::new()
+}
+
+/// Fetches all releases for a GitHub repo (for the version picker).
+/// CACHE-ONLY: reads from Redis or in-memory cache. Never calls GitHub API
+/// directly — the background scheduler populates the cache periodically.
+/// Returns a Vec of release objects with tag_name, name, published_at, wasm_url.
+pub async fn get_all_releases(
+    redis: &Option<redis::aio::ConnectionManager>,
+    repository_url: &str,
+) -> Vec<Value> {
+    let Some((owner, repo)) = parse_github_repo(repository_url) else {
+        return Vec::new();
+    };
+
+    let rkey = redis_key_releases(&owner, &repo);
+    let mkey = format!("releases:{owner}/{repo}");
+
+    // 1. Check Redis (with timeout to avoid hanging on slow Redis)
+    if let Some(ref conn) = redis {
+        let mut c = conn.clone();
+        if let Ok(val) = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            c.get::<_, Option<String>>(&rkey),
+        ).await {
+            if let Ok(Some(v)) = val {
+                if let Ok(arr) = serde_json::from_str::<Vec<Value>>(&v) {
+                    return arr;
+                }
+            }
+        }
+    }
+
+    // 2. Check in-memory fallback
+    if let Some(v) = mem_fresh(&mkey) {
+        if let Ok(arr) = serde_json::from_str::<Vec<Value>>(&v) {
+            return arr;
+        }
+    }
+
+    // Not cached — return empty. The scheduler will populate it.
+    Vec::new()
+}
+
+/// Invalidates all cached GitHub data (both Redis and in-memory).
+/// Called when the user clicks the Refresh button in the Store.
+pub async fn invalidate_all(redis: &Option<redis::aio::ConnectionManager>) {
+    // Redis: scan and delete all github:* keys
+    if let Some(ref conn) = redis {
+        let mut c = conn.clone();
+        let mut cursor: u64 = 0;
+        loop {
+            let (next_cursor, keys): (u64, Vec<String>) =
+                redis::cmd("SCAN")
+                    .arg(cursor)
+                    .arg("MATCH")
+                    .arg("github:*")
+                    .arg("COUNT")
+                    .arg(100)
+                    .query_async(&mut c)
+                    .await
+                    .unwrap_or((0, Vec::new()));
+            if !keys.is_empty() {
+                let _: redis::RedisResult<()> = c.del(&keys).await;
+            }
+            if next_cursor == 0 {
+                break;
+            }
+            cursor = next_cursor;
+        }
+    }
+
+    // In-memory: clear all
+    mem_invalidate("latest:");
+    mem_invalidate("releases:");
+    debug!("github_cache: invalidated all caches");
+}
+
+/// Pre-warms the cache for a list of repository URLs.
+/// Called by the background scheduler periodically.
+/// This is the ONLY place that calls the GitHub API — all other code
+/// paths read from cache only.
+/// Re-indexes ALL releases from scratch (not incremental) so deleted
+/// releases are removed from the cache.
+/// Returns a list of (repo_url, error_message) for repos that failed.
+pub async fn refresh_all(
+    redis: &Option<redis::aio::ConnectionManager>,
+    repo_urls: &[String],
+) -> Vec<(String, String)> {
+    let mut errors = Vec::new();
+
+    let client = match reqwest::Client::builder()
+        .user_agent("ZFS-Dashboard")
+        .timeout(Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("github_cache: failed to build HTTP client: {e}");
+            for url in repo_urls {
+                errors.push((url.clone(), format!("HTTP client build failed: {e}")));
+            }
+            return errors;
+        }
+    };
+
+    let auth = crate::modules::github_token::auth_header().await;
+
+    for url in repo_urls {
+        let Some((owner, repo)) = parse_github_repo(url) else {
+            errors.push((url.clone(), "not a valid GitHub repo URL".into()));
+            continue;
+        };
+
+        // 1. Fetch latest release
+        let latest_url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
+        let mut req = client.get(&latest_url);
+        if let Some((ref k, ref v)) = auth {
+            req = req.header(k, v);
+        }
+        match req.send().await {
+            Ok(r) if r.status().is_success() => {
+                let json: Value = r.json().await.unwrap_or(json!({}));
+                let tag = json
+                    .get("tag_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !tag.is_empty() {
+                    let rkey = redis_key_latest(&owner, &repo);
+                    let mkey = format!("latest:{owner}/{repo}");
+                    if let Some(ref conn) = redis {
+                        let mut c = conn.clone();
+                        let _: redis::RedisResult<()> =
+                            c.set_ex(&rkey, &tag, CACHE_TTL).await;
+                    }
+                    mem_set(&mkey, &tag);
+                    debug!("github_cache: refreshed latest release for {owner}/{repo}: {tag}");
+                }
+            }
+            Ok(r) => {
+                let status = r.status();
+                let body = r.text().await.unwrap_or_default();
+                let msg = if status.as_u16() == 403 && body.contains("rate limit") {
+                    "GitHub API rate limit exceeded (60/hour for unauthenticated). Wait or set GITHUB_TOKEN.".to_string()
+                } else {
+                    format!("GitHub API returned HTTP {status}: {body}")
+                };
+                warn!("github_cache: failed to fetch latest release for {owner}/{repo}: {msg}");
+                errors.push((url.clone(), msg));
+            }
+            Err(e) => {
+                warn!("github_cache: failed to fetch latest release for {owner}/{repo}: {e}");
+                errors.push((url.clone(), format!("network error: {e}")));
+            }
+        }
+
+        // 2. Fetch ALL releases (full re-index, not incremental)
+        let releases_url = format!("https://api.github.com/repos/{owner}/{repo}/releases");
+        let mut req = client.get(&releases_url);
+        if let Some((ref k, ref v)) = auth {
+            req = req.header(k, v);
+        }
+        match req.send().await {
+            Ok(r) if r.status().is_success() => {
+                let releases_raw: Vec<Value> = r.json().await.unwrap_or_default();
+                let releases: Vec<Value> = releases_raw
+                    .iter()
+                    .filter_map(|r| {
+                        let tag_name = r.get("tag_name").and_then(|v| v.as_str()).unwrap_or("");
+                        if tag_name.is_empty() {
+                            return None;
+                        }
+                        let name = r.get("name").and_then(|v| v.as_str()).unwrap_or(tag_name);
+                        let published_at = r.get("published_at").and_then(|v| v.as_str()).unwrap_or("");
+                        let assets = r.get("assets").and_then(|v| v.as_array());
+                        let wasm_asset = assets.and_then(|arr| {
+                            arr.iter().find(|a| {
+                                a.get("name")
+                                    .and_then(|n| n.as_str())
+                                    .map(|n| n.ends_with(".wasm"))
+                                    .unwrap_or(false)
+                            })
+                        });
+                        let wasm_url = wasm_asset
+                            .and_then(|a| a.get("browser_download_url"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        Some(json!({
+                            "tag_name": tag_name,
+                            "name": name,
+                            "published_at": published_at,
+                            "wasm_url": wasm_url,
+                        }))
+                    })
+                    .collect();
+
+                let serialized = serde_json::to_string(&releases).unwrap_or_default();
+                let rkey = redis_key_releases(&owner, &repo);
+                let mkey = format!("releases:{owner}/{repo}");
+                if let Some(ref conn) = redis {
+                    let mut c = conn.clone();
+                    let _: redis::RedisResult<()> =
+                        c.set_ex(&rkey, &serialized, CACHE_TTL).await;
+                }
+                mem_set(&mkey, &serialized);
+                debug!("github_cache: refreshed {} releases for {owner}/{repo}", releases.len());
+            }
+            Ok(r) => {
+                let status = r.status();
+                let body = r.text().await.unwrap_or_default();
+                let msg = if status.as_u16() == 403 && body.contains("rate limit") {
+                    "GitHub API rate limit exceeded".to_string()
+                } else {
+                    format!("GitHub API returned HTTP {status}")
+                };
+                warn!("github_cache: failed to fetch releases for {owner}/{repo}: {msg}");
+                // Only add error if latest release also failed (avoid duplicate errors)
+                if !errors.iter().any(|(u, _)| u == url) {
+                    errors.push((url.clone(), msg));
+                }
+            }
+            Err(e) => {
+                warn!("github_cache: failed to fetch releases for {owner}/{repo}: {e}");
+                if !errors.iter().any(|(u, _)| u == url) {
+                    errors.push((url.clone(), format!("network error: {e}")));
+                }
+            }
+        }
+    }
+    debug!("github_cache: background refresh complete for {} repos, {} errors", repo_urls.len(), errors.len());
+    errors
+}

@@ -5,10 +5,14 @@ import {
 } from 'recharts';
 import { Activity, HardDrive, Edit2, Check, Plus } from 'lucide-react';
 import { api, formatBytes, formatSpeed } from '../api';
+import { ActiveModule } from '../types';
 import { useLayout } from '../hooks/useLayout';
 import WidgetShell from './WidgetShell';
 import PageTransition from './PageTransition';
 import PhysicalDisksTable from './PhysicalDisksTable';
+import ModuleWidgetRenderer from './ModuleWidgetRenderer';
+import AddModuleWidgetModal from './AddModuleWidgetModal';
+import { getActiveModulesCached } from '../utils/moduleCache';
 import { useIsMobile } from '../hooks/useBreakpoint';
 
 interface PerformanceProps {
@@ -365,7 +369,12 @@ function PoolSelector({ pools, selected, onSelect }: {
 }
 
 const WIDGET_LABELS: Record<string, string> = {
-  'live-gauges':     'Live I/O Gauges',
+  'live-read-speed':  'Live Read Speed',
+  'live-write-speed': 'Live Write Speed',
+  'live-read-iops':   'Live Read IOPS',
+  'live-write-iops':  'Live Write IOPS',
+  'live-total-read':  'Live Total Read',
+  'live-total-write': 'Live Total Write',
   'disk-io':         'Physical Disks',
   'io-chart':        'Historical I/O Chart',
   'storage-history': 'Storage Space History',
@@ -381,7 +390,7 @@ const performanceDiskMetricsCache: { data: Record<string, any[]> } = { data: {} 
 
 export default function Performance({ stats, liveMetrics, serverTimeOffsetMs = 0, pools: poolsProp, selectedPool, onSelectPool }: PerformanceProps) {
   const isMobile = useIsMobile();
-  const { widgets, loaded, setVisible, reorder, toast } = useLayout('performance');
+  const { widgets, loaded, setVisible, reorder, toast, save } = useLayout('performance');
   const [editMode, setEditMode]         = useState(false);
   const [dragFrom, setDragFrom]         = useState<string | null>(null);
   const [dragOver, setDragOver]         = useState<string | null>(null);
@@ -413,6 +422,12 @@ export default function Performance({ stats, liveMetrics, serverTimeOffsetMs = 0
 
   const [diskMetrics, setDiskMetrics]   = useState<Record<string, any[]>>(() => performanceDiskMetricsCache.data);
   const [diskPools, setDiskPools]       = useState<string[]>([]);
+  const [activeModules, setActiveModules] = useState<ActiveModule[]>([]);
+  const [showAddModuleModal, setShowAddModuleModal] = useState(false);
+
+  useEffect(() => {
+    getActiveModulesCached().then(res => setActiveModules(res.modules || [])).catch(() => {});
+  }, []);
 
   // Synchronously update state from cache when cacheKey changes, to prevent showing old data or showing empty state if cache has data
   useEffect(() => {
@@ -687,6 +702,80 @@ export default function Performance({ stats, liveMetrics, serverTimeOffsetMs = 0
 
   const renderWidget = (id: string): React.ReactNode => {
     switch (id) {
+      case 'live-read-speed': {
+        const rSpeed = splitUnit(formatSpeed(ioReadBw * 1048576));
+        return (
+          <GaugeCard
+            label="↑ Read Speed"
+            value={rSpeed.value}
+            unit={rSpeed.unit}
+            color={C.read}
+            sub={`Peak ${fmtBw(livePeakR)}`}
+          />
+        );
+      }
+
+      case 'live-write-speed': {
+        const wSpeed = splitUnit(formatSpeed(ioWriteBw * 1048576));
+        return (
+          <GaugeCard
+            label="↓ Write Speed"
+            value={wSpeed.value}
+            unit={wSpeed.unit}
+            color={C.write}
+            sub={`Peak ${fmtBw(livePeakW)}`}
+          />
+        );
+      }
+
+      case 'live-read-iops': {
+        return (
+          <GaugeCard
+            label="↑ Read IOPS"
+            value={ioReadIops.toFixed(0)}
+            unit="ops/s"
+            color={C.read}
+          />
+        );
+      }
+
+      case 'live-write-iops': {
+        return (
+          <GaugeCard
+            label="↓ Write IOPS"
+            value={ioWriteIops.toFixed(0)}
+            unit="ops/s"
+            color={C.write}
+          />
+        );
+      }
+
+      case 'live-total-read': {
+        const totalRead = splitUnit(formatBytes(totalReadGB * 1073741824));
+        return (
+          <GaugeCard
+            label="Total Read"
+            value={totalRead.value}
+            unit={totalRead.unit}
+            color={C.read}
+            sub="all time"
+          />
+        );
+      }
+
+      case 'live-total-write': {
+        const totalWrite = splitUnit(formatBytes(totalWriteGB * 1073741824));
+        return (
+          <GaugeCard
+            label="Total Write"
+            value={totalWrite.value}
+            unit={totalWrite.unit}
+            color={C.write}
+            sub="all time"
+          />
+        );
+      }
+
       case 'live-gauges': {
         const rSpeed   = splitUnit(formatSpeed(ioReadBw  * 1048576));
         const wSpeed   = splitUnit(formatSpeed(ioWriteBw * 1048576));
@@ -979,7 +1068,7 @@ export default function Performance({ stats, liveMetrics, serverTimeOffsetMs = 0
             <div style={{ maxHeight: filteredSmartData.length > 8 ? 520 : undefined, overflowY: filteredSmartData.length > 8 ? 'auto' : undefined, paddingRight: filteredSmartData.length > 8 ? 4 : 0 }}>
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 12 }}>
               {smartData.length === 0 ? (
-                [1, 2, 3].map(i => <Skeleton key={i} height={80} />)
+                [1, 2, 3].map(i => <div key={i}><Skeleton height={80} /></div>)
               ) : filteredSmartData.length === 0 ? (
                 <div style={{ gridColumn: '1/-1', textAlign: 'center', padding: '24px 0', color: 'var(--text-muted)', fontSize: 12, fontFamily: 'var(--font-ui)' }}>
                   No SMART data for disks in this pool
@@ -1008,12 +1097,10 @@ export default function Performance({ stats, liveMetrics, serverTimeOffsetMs = 0
 
                 return (
                   <div key={i} style={{ background: 'var(--bg-elevated)', borderRadius: 'var(--radius)', border: '1px solid var(--border)', padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 14 }}>
-                    {/* Health icon */}
                     <div style={{ width: 32, height: 32, borderRadius: '50%', background: healthy ? 'var(--success-dim)' : failed ? 'var(--danger-dim)' : 'var(--bg-surface)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
                       <HardDrive size={16} style={{ color: statusColor }} />
                     </div>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      {/* Top row: name + role badge + status */}
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4, gap: 6 }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
                           <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.disk.name}</span>
@@ -1029,7 +1116,6 @@ export default function Performance({ stats, liveMetrics, serverTimeOffsetMs = 0
                         </div>
                         <span style={{ fontSize: 10, fontWeight: 700, color: statusColor, flexShrink: 0 }}>{statusLabel}</span>
                       </div>
-                      {/* Bottom row: temp + hours */}
                       <div style={{ display: 'flex', gap: 12, fontSize: 10, color: 'var(--text-muted)' }}>
                         {temp !== undefined && <span>Temp: <span style={{ color: temp > 50 ? 'var(--danger)' : 'var(--text-secondary)' }}>{temp}°C</span></span>}
                         {hours !== undefined && <span>Power-on: <span style={{ color: 'var(--text-secondary)' }}>{(hours/24).toFixed(0)}d</span></span>}
@@ -1043,8 +1129,32 @@ export default function Performance({ stats, liveMetrics, serverTimeOffsetMs = 0
           </Panel>
         );
 
-      default:
+      default: {
+        if (id.startsWith('module:')) {
+          const parts = id.split(':');
+          const modId = parts[1];
+          const widgetKey = parts.slice(2).join(':');
+          const mod = activeModules.find(m => m.id === modId);
+          const wDef = mod?.widget_schema?.find(w => w.key === widgetKey);
+
+          return (
+            <Panel title={wDef?.label || widgetKey} sub={mod ? `Modul: ${mod.name}` : `Modul: ${modId}`}>
+              <div style={{ padding: '16px 20px' }}>
+                <ModuleWidgetRenderer
+                  moduleId={modId}
+                  widgetKey={widgetKey}
+                  widgetType={wDef?.type || 'line'}
+                  metrics={wDef?.metrics || [widgetKey]}
+                  title={wDef?.label || widgetKey}
+                  unit={wDef?.unit}
+                  color={wDef?.color || 'var(--accent)'}
+                />
+              </div>
+            </Panel>
+          );
+        }
         return null;
+      }
     }
   };
 
@@ -1059,6 +1169,11 @@ export default function Performance({ stats, liveMetrics, serverTimeOffsetMs = 0
           {multiPool && onSelectPool && (
             <PoolSelector pools={poolsProp || []} selected={effectivePool} onSelect={onSelectPool} />
           )}
+          {editMode && (
+            <button className="btn btn-secondary" onClick={() => setShowAddModuleModal(true)}>
+              <Plus size={14} /> Add Module Widget
+            </button>
+          )}
           <button className="btn btn-secondary" onClick={() => setEditMode(!editMode)}>
             {editMode ? <Check size={14} /> : <Edit2 size={14} />}
             {editMode ? 'Done' : 'Edit Layout'}
@@ -1066,21 +1181,27 @@ export default function Performance({ stats, liveMetrics, serverTimeOffsetMs = 0
         </div>
       </div>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-        {widgets.filter(w => w.visible).map(w => (
-          <WidgetShell
-            key={w.id}
-            id={w.id}
-            editMode={editMode}
-            onDragStart={() => handleDragStart(w.id)}
-            onDragOver={() => handleDragOver(w.id)}
-            onDrop={() => handleDrop(w.id)}
-            isDragOver={dragOver === w.id}
-            onRemove={() => handleRemove(w.id)}
-          >
-            {renderWidget(w.id)}
-          </WidgetShell>
-        ))}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: 16 }}>
+        {widgets.filter(w => w.visible).map(w => {
+          const isGauge = w.id.startsWith('live-') && w.id !== 'live-gauges';
+          const content = renderWidget(w.id);
+          if (!content) return null;
+          return (
+            <div key={w.id} style={{ gridColumn: isGauge ? undefined : '1 / -1' }}>
+              <WidgetShell
+                id={w.id}
+                editMode={editMode}
+                onDragStart={() => handleDragStart(w.id)}
+                onDragOver={() => handleDragOver(w.id)}
+                onDrop={() => handleDrop(w.id)}
+                isDragOver={dragOver === w.id}
+                onRemove={() => handleRemove(w.id)}
+              >
+                {content}
+              </WidgetShell>
+            </div>
+          );
+        })}
       </div>
 
       {editMode && (
@@ -1089,13 +1210,27 @@ export default function Performance({ stats, liveMetrics, serverTimeOffsetMs = 0
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, justifyContent: 'center' }}>
             {widgets.filter(w => !w.visible).map(w => (
               <button key={w.id} className="btn btn-secondary" onClick={() => handleAdd(w.id)} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <Plus size={14} /> {WIDGET_LABELS[w.id]}
+                <Plus size={14} /> {WIDGET_LABELS[w.id] || w.id}
               </button>
             ))}
             {widgets.every(w => w.visible) && <p style={{ fontSize: 12, color: 'var(--text-muted)' }}>All widgets are currently visible.</p>}
           </div>
         </div>
       )}
+
+      {/* Add Module Widget Modal */}
+      <AddModuleWidgetModal
+        isOpen={showAddModuleModal}
+        onClose={() => setShowAddModuleModal(false)}
+        onSelectWidget={(mod, widget) => {
+          const widgetId = `module:${mod.id}:${widget.key}`;
+          if (widgets.some(w => w.id === widgetId)) {
+            setVisible(widgetId, true);
+          } else {
+            save([...widgets, { id: widgetId, visible: true, order: widgets.length }]);
+          }
+        }}
+      />
     </div>
     </PageTransition>
   );

@@ -4,33 +4,28 @@ import {
   LayoutDashboard, Activity, Database, Layers,
   Camera, FileText, Settings, HardDrive, LogOut,
   Server, ChevronLeft, ChevronRight, Bell,
+  Store, Blocks, FolderTree, Terminal,
 } from 'lucide-react';
 
-const NAV_GROUPS = [
-  {
-    label: 'Overview',
-    items: [
-      { id: 'dashboard', label: 'Dashboard',   icon: LayoutDashboard, path: '/dashboard' },
-      { id: 'stats',     label: 'Performance', icon: Activity,        path: '/stats'     },
-    ],
-  },
-  {
-    label: 'Storage',
-    items: [
-      { id: 'pools',     label: 'Storage Pools', icon: Database, path: '/pools'     },
-      { id: 'datasets',  label: 'Datasets',      icon: Layers,   path: '/datasets'  },
-      { id: 'snapshots', label: 'Snapshots',      icon: Camera,   path: '/snapshots' },
-    ],
-  },
-  {
-    label: 'System',
-    items: [
-      { id: 'logs',          label: 'System Logs',   icon: FileText, path: '/logs'          },
-      { id: 'notifications', label: 'Notifications', icon: Bell,     path: '/notifications' },
-      { id: 'settings',      label: 'Settings',      icon: Settings, path: '/settings'      },
-    ],
-  },
-];
+import { api } from '../api';
+import { CustomTab } from '../types';
+import { getNavLayout, syncCustomTabsToLayout, NavCategory } from '../utils/navStorage';
+import { getLatestReleaseCached } from '../utils/moduleCache';
+
+const ICON_MAP: Record<string, React.ComponentType<any>> = {
+  LayoutDashboard,
+  Activity,
+  Database,
+  Layers,
+  Camera,
+  Store,
+  Blocks,
+  FileText,
+  Bell,
+  Settings,
+  FolderTree,
+  Terminal,
+};
 
 export type Breakpoint = 'mobile' | 'tablet' | 'desktop';
 
@@ -56,12 +51,44 @@ export default function Sidebar({
   const location = useLocation();
   const [hoverExpanded, setHoverExpanded] = useState(false);
   const [githubVersion, setGithubVersion] = useState<string | null>(null);
+  const [navLayout, setNavLayout] = useState<NavCategory[]>([]);
+  const [advancedMode, setAdvancedMode] = useState(false);
+
+  const loadNav = async () => {
+    // Render the cached layout instantly so nav changes (e.g. deleted tabs)
+    // appear immediately without waiting for the network round-trip.
+    setNavLayout(getNavLayout());
+    try {
+      const res = await api.getCustomTabs();
+      const synced = syncCustomTabsToLayout(res.tabs);
+      setNavLayout(synced);
+    } catch {
+      /* keep cached layout */
+    }
+    // Check advanced mode
+    try {
+      const adv = await api.getAdvancedMode();
+      setAdvancedMode(adv.enabled);
+    } catch {
+      /* advanced mode off */
+    }
+  };
 
   useEffect(() => {
-    fetch('https://api.github.com/repos/ZFS-Manager/ZFS-Manager/releases/latest')
-      .then(r => r.json())
+    getLatestReleaseCached()
       .then(d => { if (d?.tag_name) setGithubVersion(d.tag_name); })
       .catch(() => {});
+
+    loadNav();
+
+    const handleNavUpdate = () => {
+      loadNav();
+    };
+
+    window.addEventListener('zfs_nav_updated', handleNavUpdate);
+    return () => {
+      window.removeEventListener('zfs_nav_updated', handleNavUpdate);
+    };
   }, []);
 
   const isMobile = breakpoint === 'mobile';
@@ -157,7 +184,7 @@ export default function Sidebar({
             <div style={{
               fontFamily: 'var(--font-ui)', fontSize: 13, fontWeight: 600,
               color: 'var(--text-primary)', letterSpacing: '-0.01em', whiteSpace: 'nowrap',
-            }}>ZFS Manager</div>
+            }}>ZFS Dashboard</div>
             <div style={{
               fontFamily: 'var(--font-mono)', fontSize: 9,
               color: 'var(--text-muted)', letterSpacing: '0.03em',
@@ -170,59 +197,78 @@ export default function Sidebar({
         flex: 1, overflowY: 'auto', overflowX: 'hidden',
         padding: isCollapsed ? '12px 6px' : '12px 8px',
       }} className="no-scrollbar">
-        {NAV_GROUPS.map((group, gi) => (
-          <div key={gi} style={{ marginBottom: gi < NAV_GROUPS.length - 1 ? 24 : 0 }}>
-            {!isCollapsed && (
-              <div style={{
-                fontFamily: 'var(--font-ui)', fontSize: 10, fontWeight: 600,
-                letterSpacing: '0.12em', textTransform: 'uppercase',
-                color: 'var(--text-muted)', padding: '0 10px 6px',
-              }}>{group.label}</div>
-            )}
-            {group.items.map(({ id, label, icon: Icon, path }) => {
-              const isActive = location.pathname === path || location.pathname.startsWith(path + '/');
-              return (
-                <NavLink
-                  key={id}
-                  to={path}
-                  onClick={handleNavClick}
-                  title={isCollapsed ? label : undefined}
-                  style={{
-                    display: 'flex', alignItems: 'center',
-                    gap: isCollapsed ? 0 : 10, height: 40,
-                    padding: isCollapsed ? '0' : '0 10px',
-                    justifyContent: isCollapsed ? 'center' : 'flex-start',
-                    borderRadius: 'var(--radius)', marginBottom: 2,
-                    color: isActive ? 'var(--text-primary)' : 'var(--text-muted)',
-                    background: isActive ? 'var(--accent-dim)' : 'transparent',
-                    borderLeft: isCollapsed ? 'none' : (isActive ? '3px solid var(--accent)' : '3px solid transparent'),
-                    outline: isCollapsed && isActive ? '2px solid var(--accent)' : 'none',
-                    outlineOffset: 2,
-                    fontFamily: 'var(--font-ui)', fontSize: 13,
-                    fontWeight: isActive ? 500 : 400,
-                    textDecoration: 'none', transition: 'all 0.1s ease', cursor: 'pointer',
-                    whiteSpace: 'nowrap', overflow: 'hidden',
-                  }}
-                  onMouseEnter={e => {
-                    if (!isActive) {
-                      (e.currentTarget as HTMLElement).style.color = 'var(--text-secondary)';
-                      (e.currentTarget as HTMLElement).style.background = 'var(--bg-hover)';
-                    }
-                  }}
-                  onMouseLeave={e => {
-                    if (!isActive) {
-                      (e.currentTarget as HTMLElement).style.color = 'var(--text-muted)';
-                      (e.currentTarget as HTMLElement).style.background = 'transparent';
-                    }
-                  }}
-                >
-                  <Icon size={18} strokeWidth={isActive ? 2 : 1.75} style={{ flexShrink: 0 }} />
-                  {!isCollapsed && label}
-                </NavLink>
-              );
-            })}
-          </div>
-        ))}
+        {(() => {
+          // Append Advanced category when advanced mode is enabled
+          let layout = navLayout;
+          if (advancedMode) {
+            layout = [...navLayout, {
+              id: 'cat_advanced',
+              label: 'Advanced',
+              items: [
+                { id: 'filesystem', label: 'File System', path: '/filesystem', iconName: 'FolderTree' },
+                { id: 'database', label: 'Database', path: '/database', iconName: 'Terminal' },
+              ],
+            }];
+          }
+          return layout.map((group, gi) => {
+          if (group.items.length === 0) return null;
+          return (
+            <div key={group.id || gi} style={{ marginBottom: gi < layout.length - 1 ? 24 : 0 }}>
+              {!isCollapsed && (
+                <div style={{
+                  fontFamily: 'var(--font-ui)', fontSize: 10, fontWeight: 600,
+                  letterSpacing: '0.12em', textTransform: 'uppercase',
+                  color: 'var(--text-muted)', padding: '0 10px 6px',
+                }}>{group.label}</div>
+              )}
+              {group.items.map(item => {
+                const IconComponent = ICON_MAP[item.iconName] || Blocks;
+                const isActive = location.pathname === item.path || (item.path !== '/dashboard' && location.pathname.startsWith(item.path + '/'));
+
+                return (
+                  <NavLink
+                    key={item.id}
+                    to={item.path}
+                    onClick={handleNavClick}
+                    title={isCollapsed ? item.label : undefined}
+                    style={{
+                      display: 'flex', alignItems: 'center',
+                      gap: isCollapsed ? 0 : 10, height: 40,
+                      padding: isCollapsed ? '0' : '0 10px',
+                      justifyContent: isCollapsed ? 'center' : 'flex-start',
+                      borderRadius: 'var(--radius)', marginBottom: 2,
+                      color: isActive ? 'var(--text-primary)' : 'var(--text-muted)',
+                      background: isActive ? 'var(--accent-dim)' : 'transparent',
+                      borderLeft: isCollapsed ? 'none' : (isActive ? '3px solid var(--accent)' : '3px solid transparent'),
+                      outline: isCollapsed && isActive ? '2px solid var(--accent)' : 'none',
+                      outlineOffset: 2,
+                      fontFamily: 'var(--font-ui)', fontSize: 13,
+                      fontWeight: isActive ? 500 : 400,
+                      textDecoration: 'none', transition: 'all 0.1s ease', cursor: 'pointer',
+                      whiteSpace: 'nowrap', overflow: 'hidden',
+                    }}
+                    onMouseEnter={e => {
+                      if (!isActive) {
+                        (e.currentTarget as HTMLElement).style.color = 'var(--text-secondary)';
+                        (e.currentTarget as HTMLElement).style.background = 'var(--bg-hover)';
+                      }
+                    }}
+                    onMouseLeave={e => {
+                      if (!isActive) {
+                        (e.currentTarget as HTMLElement).style.color = 'var(--text-muted)';
+                        (e.currentTarget as HTMLElement).style.background = 'transparent';
+                      }
+                    }}
+                  >
+                    <IconComponent size={18} strokeWidth={isActive ? 2 : 1.75} style={{ flexShrink: 0 }} />
+                    {!isCollapsed && item.label}
+                  </NavLink>
+                );
+              })}
+            </div>
+          );
+        });
+        })()}
       </nav>
 
       <div style={{
@@ -248,7 +294,7 @@ export default function Sidebar({
             {(githubVersion || healthData?.version) && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 4 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span style={{ fontSize: 11, color: 'var(--text-secondary)', fontFamily: 'var(--font-ui)', fontWeight: 600 }}>ZFS-Manager</span>
+                  <span style={{ fontSize: 11, color: 'var(--text-secondary)', fontFamily: 'var(--font-ui)', fontWeight: 600 }}>ZFS Dashboard</span>
                   <span style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
                     <span style={{ fontSize: 11, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', fontWeight: 600 }}>
                       {healthData?.version || githubVersion}
@@ -326,7 +372,7 @@ export default function Sidebar({
             title={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
             style={{
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              gap: 6, height: 34, padding: '0', width: '100%',
+              gap: 6, height: 40, padding: '0', width: '100%',
               border: 'none', background: 'transparent', cursor: 'pointer',
               color: 'var(--text-muted)', fontFamily: 'var(--font-ui)',
               fontSize: 11, fontWeight: 400, transition: 'all 0.1s', marginTop: 4,

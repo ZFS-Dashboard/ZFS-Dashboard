@@ -1,8 +1,12 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Key, Lock, Plus, Trash2, Eye, EyeOff, CheckCircle, XCircle, Copy, AlertTriangle, Monitor, Database, Shield, Zap } from 'lucide-react';
+import { AnimatePresence } from 'framer-motion';
+import { Key, Lock, Plus, Trash2, Eye, EyeOff, CheckCircle, XCircle, Copy, Monitor, Database, Shield, Zap, FolderPlus, RotateCcw, Edit2, Check, X, GripVertical, RefreshCw, Package, Palette } from 'lucide-react';
 import { api } from '../api';
 import PageTransition from './PageTransition';
+import ConfirmDialog from './ConfirmDialog';
 import { useIsMobile } from '../hooks/useBreakpoint';
+import { getNavLayout, saveNavLayout, resetNavLayout, syncCustomTabsToLayout, markCustomTabDeleting, unmarkCustomTabDeleting, NavCategory, NavItem } from '../utils/navStorage';
+import { getAccentColor, setAccentColor, ACCENT_PRESETS } from '../utils/themeColor';
 
 interface SettingsProps {
   onPasswordChanged?: () => void;
@@ -27,7 +31,532 @@ interface ToastEntry {
 
 let toastIdCounter = 0;
 
-type Tab = 'security' | 'api' | 'appearance' | 'general';
+type Tab = 'security' | 'api' | 'appearance' | 'general' | 'custom_tabs' | 'modules';
+
+function CustomTabsTab({ addToast }: { addToast: (msg: string, type: 'success' | 'error') => void }) {
+  const [layout, setLayout] = useState<NavCategory[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [newTabName, setNewTabName] = useState('');
+  const [newCatName, setNewCatName] = useState('');
+  const [editingCatId, setEditingCatId] = useState<string | null>(null);
+  const [editingCatLabel, setEditingCatLabel] = useState('');
+  const [confirmState, setConfirmState] = useState<{
+    title: string;
+    message: string;
+    confirmLabel: string;
+    variant: 'danger' | 'primary';
+    onConfirm: () => void;
+  } | null>(null);
+
+  // Drag and Drop state
+  const [draggedCatIdx, setDraggedCatIdx] = useState<number | null>(null);
+  const [dragOverCatIdx, setDragOverCatIdx] = useState<number | null>(null);
+
+  const [draggedItem, setDraggedItem] = useState<{ catIdx: number; itemIdx: number } | null>(null);
+  const [dragOverItem, setDragOverItem] = useState<{ catIdx: number; itemIdx: number } | null>(null);
+
+  const load = async () => {
+    try {
+      const res = await api.getCustomTabs();
+      const synced = syncCustomTabsToLayout(res.tabs);
+      setLayout(synced);
+    } catch (err: any) {
+      setLayout(getNavLayout());
+      addToast(err.message || 'Failed to load tabs', 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const updateAndSaveLayout = (newLayout: NavCategory[]) => {
+    setLayout(newLayout);
+    saveNavLayout(newLayout);
+  };
+
+  const handleCreateTab = async () => {
+    if (!newTabName.trim()) return;
+    try {
+      await api.createCustomTab(newTabName.trim(), 'layout');
+      setNewTabName('');
+      addToast(`Tab "${newTabName}" created`, 'success');
+      await load();
+    } catch (err: any) {
+      addToast(err.message || 'Failed to create tab', 'error');
+    }
+  };
+
+  const handleDeleteTab = (slug: string, tabName: string) => {
+    setConfirmState({
+      title: 'Delete tab',
+      message: `Really delete tab "${tabName}"? The layout and all contained widgets will be lost.`,
+      confirmLabel: 'Delete',
+      variant: 'danger',
+      onConfirm: async () => {
+        // Optimistic update: remove the tab from the nav layout immediately so
+        // it disappears instantly instead of waiting for backend round-trips.
+        // The pending-deletion marker prevents background syncs from
+        // resurrecting the tab while the delete request is in flight.
+        markCustomTabDeleting(slug);
+        const nextLayout = layout.map(c => ({
+          ...c,
+          items: c.items.filter(i => i.customSlug !== slug),
+        }));
+        updateAndSaveLayout(nextLayout);
+        try {
+          await api.deleteCustomTab(slug);
+          addToast(`Tab "${tabName}" deleted`, 'success');
+          load(); // silent background re-sync
+        } catch (err: any) {
+          addToast(err.message || 'Failed to delete tab', 'error');
+          load(); // restore consistent state on failure
+        } finally {
+          unmarkCustomTabDeleting(slug);
+        }
+      },
+    });
+  };
+
+  const handleAddCategory = () => {
+    if (!newCatName.trim()) return;
+    const catId = `cat_${Date.now()}`;
+    const newCat: NavCategory = {
+      id: catId,
+      label: newCatName.trim(),
+      items: [],
+    };
+    const nextLayout = [...layout, newCat];
+    setNewCatName('');
+    updateAndSaveLayout(nextLayout);
+    addToast(`Category "${newCat.label}" added`, 'success');
+  };
+
+  const handleDeleteCategory = (catId: string, label: string) => {
+    if (layout.length <= 1) {
+      addToast('At least one category must remain.', 'error');
+      return;
+    }
+    setConfirmState({
+      title: 'Delete category',
+      message: `Delete category "${label}"? Contained tabs will be moved to the first category.`,
+      confirmLabel: 'Delete',
+      variant: 'danger',
+      onConfirm: () => {
+        const targetCat = layout.find(c => c.id !== catId);
+        if (!targetCat) return;
+
+        const catToDelete = layout.find(c => c.id === catId);
+        const orphanedItems = catToDelete ? catToDelete.items : [];
+
+        const nextLayout = layout.filter(c => c.id !== catId).map(c => {
+          if (c.id === targetCat.id) {
+            return { ...c, items: [...c.items, ...orphanedItems] };
+          }
+          return c;
+        });
+
+        updateAndSaveLayout(nextLayout);
+        addToast(`Category "${label}" deleted`, 'success');
+      },
+    });
+  };
+
+  const handleSaveCatRename = (catId: string) => {
+    if (!editingCatLabel.trim()) return;
+    const nextLayout = layout.map(c => c.id === catId ? { ...c, label: editingCatLabel.trim() } : c);
+    setEditingCatId(null);
+    updateAndSaveLayout(nextLayout);
+  };
+
+  const handleReset = () => {
+    setConfirmState({
+      title: 'Reset navigation',
+      message: 'Reset navigation to default settings? Custom categories and orderings will be lost.',
+      confirmLabel: 'Reset',
+      variant: 'primary',
+      onConfirm: () => {
+        resetNavLayout();
+        load();
+        addToast('Navigation reset', 'success');
+      },
+    });
+  };
+
+  // --- Category Drag & Drop ---
+  // Clears every drag-related state. MUST run on dragend so an element never
+  // stays stuck in the translucent "being dragged" look (e.g. when the drag
+  // is cancelled, dropped outside a target, or ended without moving).
+  const clearDragState = () => {
+    setDraggedCatIdx(null);
+    setDragOverCatIdx(null);
+    setDraggedItem(null);
+    setDragOverItem(null);
+  };
+
+  const handleCatDragStart = (e: React.DragEvent, catIdx: number) => {
+    e.stopPropagation();
+    setDraggedCatIdx(catIdx);
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('type', 'category');
+  };
+
+  const handleCatDragOver = (e: React.DragEvent, catIdx: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (draggedCatIdx !== null) {
+      setDragOverCatIdx(draggedCatIdx !== catIdx ? catIdx : null);
+    }
+  };
+
+  const handleCatDrop = (e: React.DragEvent, targetCatIdx: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const srcCatIdx = draggedCatIdx;
+    clearDragState();
+
+    if (srcCatIdx !== null && srcCatIdx !== targetCatIdx) {
+      const nextLayout = [...layout];
+      const [moved] = nextLayout.splice(srcCatIdx, 1);
+      nextLayout.splice(targetCatIdx, 0, moved);
+      updateAndSaveLayout(nextLayout);
+    }
+  };
+
+  // --- Item Drag & Drop ---
+  const handleItemDragStart = (e: React.DragEvent, catIdx: number, itemIdx: number) => {
+    e.stopPropagation();
+    setDraggedItem({ catIdx, itemIdx });
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('type', 'item');
+  };
+
+  const handleItemDragOver = (e: React.DragEvent, catIdx: number, itemIdx?: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (draggedItem) {
+      setDragOverItem({ catIdx, itemIdx: itemIdx ?? -1 });
+    }
+  };
+
+  const handleItemDrop = (e: React.DragEvent, targetCatIdx: number, targetItemIdx?: number) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (!draggedItem) {
+      clearDragState();
+      return;
+    }
+
+    const { catIdx: srcCatIdx, itemIdx: srcItemIdx } = draggedItem;
+    clearDragState();
+
+    if (srcCatIdx === targetCatIdx && srcItemIdx === targetItemIdx) return;
+
+    const nextLayout = layout.map(c => ({ ...c, items: [...c.items] }));
+    const [itemToMove] = nextLayout[srcCatIdx].items.splice(srcItemIdx, 1);
+    if (!itemToMove) return;
+
+    if (typeof targetItemIdx === 'number' && targetItemIdx >= 0) {
+      nextLayout[targetCatIdx].items.splice(targetItemIdx, 0, itemToMove);
+    } else {
+      nextLayout[targetCatIdx].items.push(itemToMove);
+    }
+
+    updateAndSaveLayout(nextLayout);
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+      {/* Top Action Cards */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16 }}>
+        {/* Create Tab */}
+        <div style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <label style={{ ...labelStyle, margin: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Zap size={14} color="var(--accent)" /> Create new tab
+          </label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input
+              type="text"
+              value={newTabName}
+              onChange={e => setNewTabName(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && handleCreateTab()}
+              placeholder="e.g. Immich Metrics"
+              style={{ ...inputStyle, flex: 1 }}
+            />
+            <button
+              onClick={handleCreateTab}
+              disabled={!newTabName.trim()}
+              className="btn btn-primary"
+              style={{ flexShrink: 0, height: 40 }}
+            >
+              <Plus size={14} /> Create tab
+            </button>
+          </div>
+        </div>
+
+        {/* Create Category */}
+        <div style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 'var(--radius)', padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <label style={{ ...labelStyle, margin: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <FolderPlus size={14} color="var(--accent)" /> New navigation category
+          </label>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <input
+              type="text"
+              value={newCatName}
+              onChange={e => setNewCatName(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && handleAddCategory()}
+              placeholder="e.g. Media Metrics"
+              style={{ ...inputStyle, flex: 1 }}
+            />
+            <button
+              onClick={handleAddCategory}
+              disabled={!newCatName.trim()}
+              className="btn btn-secondary"
+              style={{ flexShrink: 0, height: 40 }}
+            >
+              <Plus size={14} /> Create category
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Header & Reset Button */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div>
+          <h4 style={{ margin: 0, fontFamily: 'var(--font-ui)', fontSize: 15, fontWeight: 700, color: 'var(--text-primary)' }}>
+            Sidebar navigation & categories
+          </h4>
+          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+            Easily reorder categories and tabs via drag & drop. Changes are applied to the sidebar immediately!
+          </span>
+        </div>
+        <button
+          onClick={handleReset}
+          className="btn btn-secondary"
+          style={{ height: 32, padding: '0 12px', fontSize: 12, color: 'var(--text-muted)' }}
+          title="Reset to default layout"
+        >
+          <RotateCcw size={13} /> Restore default
+        </button>
+      </div>
+
+      {/* Category List */}
+      {loading ? (
+        <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>Loading navigation structure...</div>
+      ) : layout.length === 0 ? (
+        <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>No navigation categories found.</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {layout.map((cat, catIdx) => {
+            const isCatDragged = draggedCatIdx === catIdx;
+            const isCatDragOver = dragOverCatIdx === catIdx;
+
+            return (
+              <div
+                key={cat.id}
+                onDragOver={(e) => handleCatDragOver(e, catIdx)}
+                onDrop={(e) => {
+                  if (draggedCatIdx !== null) {
+                    handleCatDrop(e, catIdx);
+                  } else if (draggedItem !== null) {
+                    handleItemDrop(e, catIdx);
+                  }
+                }}
+                style={{
+                  background: 'var(--bg-elevated)',
+                  border: isCatDragOver ? '2px dashed var(--accent)' : '1px solid var(--border)',
+                  borderRadius: 'var(--radius)',
+                  overflow: 'hidden',
+                  opacity: isCatDragged ? 0.4 : 1,
+                  transition: 'border 0.15s ease, opacity 0.15s ease',
+                }}
+              >
+                {/* Category Header (Draggable for category reordering) */}
+                <div
+                  draggable={editingCatId !== cat.id}
+                  onDragStart={(e) => handleCatDragStart(e, catIdx)}
+                  onDragEnd={clearDragState}
+                  style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    padding: '10px 14px', background: 'var(--bg-hover)', borderBottom: '1px solid var(--border)',
+                    cursor: editingCatId === cat.id ? 'default' : 'grab',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1 }}>
+                    <GripVertical size={16} style={{ color: 'var(--text-muted)', flexShrink: 0, cursor: 'grab' }} />
+
+                    {editingCatId === cat.id ? (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1 }}>
+                        <input
+                          type="text"
+                          value={editingCatLabel}
+                          onChange={e => setEditingCatLabel(e.target.value)}
+                          onKeyDown={e => e.key === 'Enter' && handleSaveCatRename(cat.id)}
+                          style={{ ...inputStyle, height: 30, fontSize: 13 }}
+                          autoFocus
+                        />
+                        <button className="btn btn-primary" style={{ height: 30, padding: '0 8px' }} onClick={() => handleSaveCatRename(cat.id)}>
+                          <Check size={14} />
+                        </button>
+                        <button className="btn btn-secondary" style={{ height: 30, padding: '0 8px' }} onClick={() => setEditingCatId(null)}>
+                          <X size={14} />
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        <span style={{ fontFamily: 'var(--font-ui)', fontSize: 13, fontWeight: 700, color: 'var(--text-primary)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
+                          {cat.label}
+                        </span>
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                          ({cat.items.length} {cat.items.length === 1 ? 'Tab' : 'Tabs'})
+                        </span>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setEditingCatId(cat.id); setEditingCatLabel(cat.label); }}
+                          style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', display: 'flex' }}
+                          title="Rename category"
+                        >
+                          <Edit2 size={12} />
+                        </button>
+                      </>
+                    )}
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleDeleteCategory(cat.id, cat.label); }}
+                      style={{ background: 'transparent', border: 'none', color: 'var(--danger)', cursor: 'pointer', marginLeft: 6, opacity: 0.8 }}
+                      title="Delete category"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Items inside Category (Draggable between categories and within category) */}
+                <div
+                  onDragOver={(e) => {
+                    if (draggedCatIdx !== null) {
+                      handleCatDragOver(e, catIdx);
+                    } else {
+                      handleItemDragOver(e, catIdx);
+                    }
+                  }}
+                  onDrop={(e) => {
+                    // A category dropped onto the items area of another
+                    // category must still snap into place (not be swallowed).
+                    if (draggedCatIdx !== null) {
+                      handleCatDrop(e, catIdx);
+                    } else {
+                      handleItemDrop(e, catIdx);
+                    }
+                  }}
+                  style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 6, minHeight: 44 }}
+                >
+                  {cat.items.length === 0 ? (
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', fontStyle: 'italic', padding: 8 }}>
+                      No tabs in this category. Drag tabs here via drag & drop.
+                    </div>
+                  ) : (
+                    cat.items.map((item, itemIdx) => {
+                      const isItemDragged = draggedItem?.catIdx === catIdx && draggedItem?.itemIdx === itemIdx;
+                      const isItemDragOver = dragOverItem?.catIdx === catIdx && dragOverItem?.itemIdx === itemIdx;
+
+                      return (
+                        <div
+                          key={item.id}
+                          draggable={true}
+                          onDragStart={(e) => handleItemDragStart(e, catIdx, itemIdx)}
+                          onDragEnd={clearDragState}
+                          onDragOver={(e) => {
+                            if (draggedCatIdx !== null) {
+                              handleCatDragOver(e, catIdx);
+                            } else {
+                              handleItemDragOver(e, catIdx, itemIdx);
+                            }
+                          }}
+                          onDrop={(e) => {
+                            // While dragging a category, item rows must not
+                            // swallow the drop — let the category snap in.
+                            if (draggedCatIdx !== null) {
+                              handleCatDrop(e, catIdx);
+                            } else {
+                              handleItemDrop(e, catIdx, itemIdx);
+                            }
+                          }}
+                          style={{
+                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                            padding: '8px 12px', background: 'var(--bg-base)',
+                            border: isItemDragOver ? '2px dashed var(--accent)' : '1px solid var(--border)',
+                            borderRadius: 'var(--radius)',
+                            opacity: isItemDragged ? 0.4 : 1,
+                            cursor: 'grab',
+                            transition: 'all 0.15s ease',
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                            <GripVertical size={14} style={{ color: 'var(--text-muted)', cursor: 'grab', flexShrink: 0 }} />
+                            <span style={{ fontFamily: 'var(--font-ui)', fontSize: 13, fontWeight: 500, color: 'var(--text-primary)' }}>
+                              {item.label}
+                            </span>
+                            {item.isCustom && (
+                              <span style={{ fontSize: 10, background: 'var(--accent-dim)', color: 'var(--accent)', padding: '2px 6px', borderRadius: 4, fontFamily: 'var(--font-mono)' }}>
+                                Custom
+                              </span>
+                            )}
+                            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)' }}>
+                              {item.path}
+                            </span>
+                          </div>
+
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                            {/* Delete if custom tab */}
+                            {item.isCustom && item.customSlug && (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); handleDeleteTab(item.customSlug!, item.label); }}
+                                style={{ background: 'transparent', border: 'none', color: 'var(--danger)', cursor: 'pointer', display: 'flex', marginLeft: 4 }}
+                                title="Delete tab"
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+               </div>
+             );
+           })}
+         </div>
+       )}
+
+      <AnimatePresence>
+        {confirmState && (
+          <ConfirmDialog
+            title={confirmState.title}
+            message={confirmState.message}
+            confirmLabel={confirmState.confirmLabel}
+            variant={confirmState.variant}
+            onConfirm={() => { const fn = confirmState.onConfirm; setConfirmState(null); fn(); }}
+            onCancel={() => setConfirmState(null)}
+          />
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+/* ── Tab definition ── */
+const TABS: { id: Tab; label: string; icon: React.ReactNode; desc: string }[] = [
+  { id: 'security',   label: 'Security',   icon: <Lock size={15} />,    desc: 'Password & authentication' },
+  { id: 'modules',    label: 'Modules',    icon: <Package size={15} />, desc: 'Module updates & GitHub token' },
+  { id: 'custom_tabs', label: 'Tabs',       icon: <Zap size={15} />,     desc: 'Modular dashboard tabs & navigation' },
+  { id: 'api',        label: 'API Keys',   icon: <Key size={15} />,     desc: 'Programmatic access tokens' },
+  { id: 'appearance', label: 'Appearance', icon: <Monitor size={15} />, desc: 'Interface preferences & theme color' },
+  { id: 'general',    label: 'General',    icon: <Database size={15} />, desc: 'Application defaults' },
+];
 
 function ToastItem({ entry, onClose }: { entry: ToastEntry; onClose: () => void }) {
   useEffect(() => {
@@ -71,9 +600,9 @@ function SettingRow({ label, description, children }: { label: string; descripti
   );
 }
 
-function Toggle({ value, onChange }: { value: boolean; onChange: (v: boolean) => void }) {
+function Toggle({ value, onChange, disabled }: { value: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
   return (
-    <button onClick={() => onChange(!value)} style={{ width: 44, height: 22, borderRadius: 11, flexShrink: 0, background: value ? 'var(--success)' : 'var(--bg-elevated)', border: `1px solid ${value ? 'var(--success)' : 'var(--border)'}`, position: 'relative', cursor: 'pointer', transition: 'all 0.2s' }}>
+    <button onClick={() => !disabled && onChange(!value)} disabled={disabled} style={{ width: 44, height: 22, borderRadius: 11, flexShrink: 0, background: value ? 'var(--success)' : 'var(--bg-elevated)', border: `1px solid ${value ? 'var(--success)' : 'var(--border)'}`, position: 'relative', cursor: disabled ? 'not-allowed' : 'pointer', transition: 'all 0.2s', opacity: disabled ? 0.5 : 1 }}>
       <div style={{ position: 'absolute', top: 2, left: value ? 22 : 2, width: 16, height: 16, borderRadius: 8, background: '#fff', transition: 'left 0.2s' }} />
     </button>
   );
@@ -185,6 +714,166 @@ function SecurityTab({ onSuccess }: { onSuccess: () => void }) {
   );
 }
 
+/* ── Modules tab ── */
+function ModulesTab() {
+  // GitHub update interval
+  const [githubHours, setGithubHours] = useState(6);
+  const [githubSaving, setGithubSaving] = useState(false);
+  const [githubSaved, setGithubSaved] = useState(false);
+
+  // GitHub token
+  const [githubToken, setGithubToken] = useState('');
+  const [githubTokenConfigured, setGithubTokenConfigured] = useState(false);
+  const [githubTokenSaving, setGithubTokenSaving] = useState(false);
+  const [githubTokenSaved, setGithubTokenSaved] = useState(false);
+
+  useEffect(() => {
+    api.getGithubInterval().then(r => setGithubHours(r.hours)).catch(() => {});
+    api.getGithubToken().then(r => {
+      setGithubTokenConfigured(r.configured);
+    }).catch(() => {});
+  }, []);
+
+  const saveGithubInterval = async () => {
+    setGithubSaving(true);
+    setGithubSaved(false);
+    try {
+      const r = await api.setGithubInterval(githubHours);
+      setGithubHours(r.hours);
+      setGithubSaved(true);
+      setTimeout(() => setGithubSaved(false), 3000);
+    } catch { /* ignore */ }
+    finally { setGithubSaving(false); }
+  };
+
+  const saveGithubToken = async () => {
+    setGithubTokenSaving(true);
+    setGithubTokenSaved(false);
+    try {
+      const r = await api.setGithubToken(githubToken);
+      setGithubTokenConfigured(r.configured);
+      setGithubToken('');
+      setGithubTokenSaved(true);
+      setTimeout(() => setGithubTokenSaved(false), 3000);
+    } catch { /* ignore */ }
+    finally { setGithubTokenSaving(false); }
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+      {/* Module Update Check */}
+      <div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+          <RefreshCw size={16} style={{ color: 'var(--accent)' }} />
+          <div>
+            <div style={{ fontFamily: 'var(--font-ui)', fontSize: 14, fontWeight: 700, color: 'var(--text-primary)' }}>
+              Module Update Check
+            </div>
+            <div style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
+              How often the background job fetches latest releases from GitHub for all modules.
+              Page loads never call GitHub — they read from cache only.
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <label style={labelStyle}>Every</label>
+          <input
+            type="number"
+            min={1}
+            max={168}
+            value={githubHours}
+            onChange={e => setGithubHours(Math.max(1, Math.min(168, parseInt(e.target.value, 10) || 6)))}
+            style={{ ...inputStyle, width: 80 }}
+          />
+          <span style={{ fontFamily: 'var(--font-ui)', fontSize: 13, color: 'var(--text-secondary)' }}>
+            hour{githubHours === 1 ? '' : 's'}
+          </span>
+          <button
+            onClick={saveGithubInterval}
+            disabled={githubSaving}
+            className="btn btn-primary"
+            style={{ height: 36, fontSize: 13, padding: '0 18px', opacity: githubSaving ? 0.6 : 1, display: 'flex', alignItems: 'center', gap: 6 }}
+          >
+            {githubSaving ? 'Saving…' : githubSaved ? 'Saved!' : 'Save'}
+          </button>
+        </div>
+        <p style={{ fontFamily: 'var(--font-ui)', fontSize: 11, color: 'var(--text-muted)', margin: '8px 0 0', lineHeight: 1.4 }}>
+          Range: 1–168 hours. Lower values mean faster update detection but more GitHub API calls (rate limit: 60/hour unauthenticated).
+        </p>
+      </div>
+
+      {/* GitHub token */}
+      <div style={{ paddingTop: 8, borderTop: '1px solid var(--border)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+          <Key size={16} style={{ color: 'var(--accent)' }} />
+          <div>
+            <div style={{ fontFamily: 'var(--font-ui)', fontSize: 14, fontWeight: 700, color: 'var(--text-primary)' }}>
+              GitHub Token
+            </div>
+            <div style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
+              Personal Access Token for GitHub API auth. Increases rate limit from 60 to 5000 req/hour and enables private repo modules.
+            </div>
+          </div>
+        </div>
+
+        {githubTokenSaved && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, padding: '8px 12px', background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.3)', borderRadius: 'var(--radius)' }}>
+            <CheckCircle size={14} style={{ color: 'var(--green)' }} />
+            <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-secondary)' }}>
+              Token saved.
+            </span>
+          </div>
+        )}
+
+        {/* Status indicator: shows whether a token is configured */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, padding: '8px 12px', background: githubTokenConfigured ? 'rgba(34,197,94,0.06)' : 'rgba(239,68,68,0.06)', border: `1px solid ${githubTokenConfigured ? 'rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.2)'}`, borderRadius: 'var(--radius)' }}>
+          {githubTokenConfigured ? (
+            <CheckCircle size={14} style={{ color: 'var(--success)' }} />
+          ) : (
+            <XCircle size={14} style={{ color: 'var(--danger)' }} />
+          )}
+          <span style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-secondary)' }}>
+            {githubTokenConfigured ? 'Token configured' : 'No token configured'}
+          </span>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <input
+            type="password"
+            value={githubToken}
+            onChange={e => setGithubToken(e.target.value)}
+            placeholder={githubTokenConfigured ? 'Enter new token to replace…' : 'ghp_xxxxxxxxxxxx…'}
+            style={{ ...inputStyle, flex: 1, minWidth: 250, fontFamily: 'var(--font-mono)', fontSize: 12 }}
+          />
+          <button
+            onClick={saveGithubToken}
+            disabled={githubTokenSaving || (!githubToken && !githubTokenConfigured)}
+            className="btn btn-primary"
+            style={{ height: 36, fontSize: 13, padding: '0 18px', opacity: (githubTokenSaving || (!githubToken && !githubTokenConfigured)) ? 0.6 : 1, display: 'flex', alignItems: 'center', gap: 6 }}
+          >
+            {githubTokenSaving ? 'Saving…' : githubTokenConfigured ? 'Replace' : 'Save'}
+          </button>
+          {githubTokenConfigured && (
+            <button
+              onClick={() => { setGithubToken(''); saveGithubToken(); }}
+              disabled={githubTokenSaving}
+              className="btn btn-secondary"
+              style={{ height: 36, fontSize: 13, padding: '0 18px', color: 'var(--danger)' }}
+            >
+              Remove
+            </button>
+          )}
+        </div>
+        <p style={{ fontFamily: 'var(--font-ui)', fontSize: 11, color: 'var(--text-muted)', margin: '8px 0 0', lineHeight: 1.4 }}>
+          Create a token at GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens.
+          Needs <code style={{ fontFamily: 'var(--font-mono)' }}>repo</code> scope for private repos, or just public read for rate limit increase.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 /* ── API Keys tab ── */
 function ApiKeysTab({ addToast }: { addToast: (msg: string, type: 'success' | 'error') => void }) {
   const [keys, setKeys]             = useState<ApiKeyRow[]>([]);
@@ -244,7 +933,7 @@ function ApiKeysTab({ addToast }: { addToast: (msg: string, type: 'success' | 'e
       <div style={{ display: 'flex', gap: 12, padding: '14px 16px', background: 'rgba(99,179,237,0.06)', border: '1px solid rgba(99,179,237,0.18)', borderRadius: 'var(--radius)' }}>
         <Key size={16} style={{ color: 'var(--accent)', flexShrink: 0, marginTop: 1 }} />
         <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: 0, lineHeight: 1.6 }}>
-          API keys grant programmatic access to the ZFS Manager API. Store them securely — they are <strong style={{ color: 'var(--text-primary)' }}>only shown once</strong>.
+          API keys grant programmatic access to the ZFS Dashboard API. Store them securely — they are <strong style={{ color: 'var(--text-primary)' }}>only shown once</strong>.
         </p>
       </div>
 
@@ -282,7 +971,7 @@ function ApiKeysTab({ addToast }: { addToast: (msg: string, type: 'success' | 'e
             <option value="readwrite">Read / Write</option>
             <option value="admin">Admin</option>
           </select>
-          <button onClick={handleCreate} disabled={creating || !newKeyName.trim()} className="btn btn-primary" style={{ flexShrink: 0, opacity: (creating || !newKeyName.trim()) ? 0.5 : 1 }}>
+          <button onClick={handleCreate} disabled={creating || !newKeyName.trim()} className="btn btn-primary" style={{ flexShrink: 0, height: 40, opacity: (creating || !newKeyName.trim()) ? 0.5 : 1 }}>
             <Plus size={14} /> {creating ? 'Creating…' : 'Create Key'}
           </button>
         </div>
@@ -321,23 +1010,18 @@ function ApiKeysTab({ addToast }: { addToast: (msg: string, type: 'success' | 'e
         </div>
       )}
 
-      {confirmState && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1100, backdropFilter: 'blur(4px)' }}>
-          <div style={{ background: 'var(--bg-surface)', padding: 24, borderRadius: 'var(--radius-lg)', border: '1px solid var(--border)', maxWidth: 400, width: '100%', boxShadow: '0 20px 50px rgba(0,0,0,0.6)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
-              <div style={{ width: 40, height: 40, borderRadius: '50%', background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--danger)' }}>
-                <AlertTriangle size={20} />
-              </div>
-              <h4 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: 'var(--text-primary)' }}>{confirmState.title}</h4>
-            </div>
-            <p style={{ color: 'var(--text-muted)', fontSize: 13, lineHeight: 1.5, margin: '0 0 20px 0' }}>{confirmState.message}</p>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12 }}>
-              <button className="btn btn-secondary" onClick={() => setConfirmState(null)}>Cancel</button>
-              <button className="btn btn-primary" onClick={() => { confirmState.onConfirm(); setConfirmState(null); }} style={{ background: 'var(--danger)', borderColor: 'var(--danger)' }}>Revoke</button>
-            </div>
-          </div>
-        </div>
-      )}
+      <AnimatePresence>
+        {confirmState && (
+          <ConfirmDialog
+            title={confirmState.title}
+            message={confirmState.message}
+            confirmLabel="Revoke"
+            variant="danger"
+            onConfirm={() => { const fn = confirmState.onConfirm; setConfirmState(null); fn(); }}
+            onCancel={() => setConfirmState(null)}
+          />
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -345,6 +1029,13 @@ function ApiKeysTab({ addToast }: { addToast: (msg: string, type: 'success' | 'e
 /* ── Appearance tab ── */
 function AppearanceTab() {
   const [animEnabled, setAnimEnabled] = useState(localStorage.getItem('page_animations') !== 'false');
+  const [accentColor, setAccentColorState] = useState(getAccentColor());
+  const [advancedMode, setAdvancedMode] = useState(false);
+  const [advancedLoading, setAdvancedLoading] = useState(false);
+
+  useEffect(() => {
+    api.getAdvancedMode().then(r => setAdvancedMode(r.enabled)).catch(() => {});
+  }, []);
 
   const toggle = () => {
     const next = !animEnabled;
@@ -352,11 +1043,102 @@ function AppearanceTab() {
     localStorage.setItem('page_animations', next ? 'true' : 'false');
   };
 
+  const handleColorChange = (hex: string) => {
+    setAccentColorState(hex);
+    setAccentColor(hex);
+  };
+
+  const toggleAdvanced = async () => {
+    setAdvancedLoading(true);
+    const next = !advancedMode;
+    try {
+      await api.setAdvancedMode(next);
+      setAdvancedMode(next);
+      // Force sidebar reload by dispatching the nav update event
+      window.dispatchEvent(new CustomEvent('zfs_nav_updated'));
+    } catch (err: any) {
+      console.error('Failed to toggle advanced mode:', err);
+    } finally {
+      setAdvancedLoading(false);
+    }
+  };
+
   return (
     <div>
       <SettingRow label="Page transition animations" description="Slide-in animation when switching between pages">
         <Toggle value={animEnabled} onChange={toggle} />
       </SettingRow>
+
+      {/* Advanced mode toggle */}
+      <div style={{ paddingTop: 16, borderTop: '1px solid var(--border-subtle)', marginBottom: 16 }}>
+        <SettingRow
+          label="Advanced mode"
+          description="Show File System and Database tools in the sidebar for debugging. Off by default."
+        >
+          <Toggle value={advancedMode} onChange={toggleAdvanced} disabled={advancedLoading} />
+        </SettingRow>
+      </div>
+
+      {/* Accent color picker */}
+      <div style={{ paddingTop: 16, borderTop: '1px solid var(--border-subtle)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+          <Palette size={16} style={{ color: 'var(--accent)' }} />
+          <div>
+            <div style={{ fontFamily: 'var(--font-ui)', fontSize: 13, fontWeight: 500, color: 'var(--text-primary)' }}>
+              Accent Color
+            </div>
+            <div style={{ fontFamily: 'var(--font-ui)', fontSize: 12, color: 'var(--text-muted)', marginTop: 2 }}>
+              Base color for buttons, links, highlights. Applied live and saved across devices.
+            </div>
+          </div>
+        </div>
+
+        {/* Preset swatches */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 14 }}>
+          {ACCENT_PRESETS.map(color => (
+            <button
+              key={color}
+              onClick={() => handleColorChange(color)}
+              style={{
+                width: 36, height: 36, borderRadius: 'var(--radius)',
+                background: color, border: accentColor.toLowerCase() === color.toLowerCase() ? '3px solid var(--text-primary)' : '2px solid var(--border)',
+                cursor: 'pointer', transition: 'border 0.15s, transform 0.15s',
+                transform: accentColor.toLowerCase() === color.toLowerCase() ? 'scale(1.1)' : 'scale(1)',
+              }}
+              title={color}
+            />
+          ))}
+        </div>
+
+        {/* Custom color input */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <input
+            type="color"
+            value={accentColor}
+            onChange={e => handleColorChange(e.target.value)}
+            style={{ width: 40, height: 36, border: '1px solid var(--border)', borderRadius: 'var(--radius)', cursor: 'pointer', background: 'none', padding: 2 }}
+          />
+          <input
+            type="text"
+            value={accentColor}
+            onChange={e => {
+              const v = e.target.value;
+              if (/^#[0-9a-fA-F]{0,6}$/.test(v)) {
+                setAccentColorState(v);
+                if (v.length === 7) setAccentColor(v);
+              }
+            }}
+            style={{ ...inputStyle, width: 120, fontFamily: 'var(--font-mono)', fontSize: 13 }}
+          />
+          <button
+            onClick={() => handleColorChange('#6366f1')}
+            className="btn btn-secondary"
+            style={{ height: 36, fontSize: 12, padding: '0 14px' }}
+          >
+            Reset
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -383,14 +1165,6 @@ function GeneralTab({ pools, selectedPool, onSelectPool }: { pools: any[]; selec
     </div>
   );
 }
-
-/* ── Tab definition ── */
-const TABS: { id: Tab; label: string; icon: React.ReactNode; desc: string }[] = [
-  { id: 'security',   label: 'Security',   icon: <Lock size={15} />,    desc: 'Password & authentication' },
-  { id: 'api',        label: 'API Keys',   icon: <Key size={15} />,     desc: 'Programmatic access tokens' },
-  { id: 'appearance', label: 'Appearance', icon: <Monitor size={15} />, desc: 'Interface preferences' },
-  { id: 'general',    label: 'General',    icon: <Database size={15} />, desc: 'Application defaults' },
-];
 
 /* ── Main Settings page ── */
 export default function Settings({ onPasswordChanged, pools = [], selectedPool, onSelectPool }: SettingsProps) {
@@ -492,10 +1266,12 @@ export default function Settings({ onPasswordChanged, pools = [], selectedPool, 
             </div>
           </div>
 
-          {activeTab === 'security'   && <SecurityTab onSuccess={handlePasswordChanged} />}
-          {activeTab === 'api'        && <ApiKeysTab addToast={addToast} />}
-          {activeTab === 'appearance' && <AppearanceTab />}
-          {activeTab === 'general'    && pools.length > 1 && <GeneralTab pools={pools} selectedPool={selectedPool} onSelectPool={onSelectPool} />}
+          {activeTab === 'security'    && <SecurityTab onSuccess={handlePasswordChanged} />}
+          {activeTab === 'modules'     && <ModulesTab />}
+          {activeTab === 'api'         && <ApiKeysTab addToast={addToast} />}
+          {activeTab === 'custom_tabs' && <CustomTabsTab addToast={addToast} />}
+          {activeTab === 'appearance'  && <AppearanceTab />}
+          {activeTab === 'general'     && pools.length > 1 && <GeneralTab pools={pools} selectedPool={selectedPool} onSelectPool={onSelectPool} />}
         </div>
       </div>
     </div>
