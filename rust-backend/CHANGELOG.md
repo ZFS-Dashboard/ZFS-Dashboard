@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0](https://github.com/ZFS-Dashboard/ZFS-Dashboard/compare/v1.0.0...v1.1.0) (2026-11-15)
+
+
+### Features
+
+* add immich example module, registry index, and module release CI ([19297ed](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/19297ede1a144bd88030d911c36ef23be708e1dc))
+* add sandboxed Wasm module system (runtime, API, scheduler) ([f2c7bb0](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/f2c7bb03c393e41bbc059a906eba08ed20abebdc))
+* introduce refinery migrations with module system schema ([96cfcfc](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/96cfcfc2baef8f85a3d66e842a457b17e83fd8f7))
+* merge frontend and backend into a single container ([3e03505](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/3e035050a93a5beb2cebe9f533eded0f3b829e64))
+* rebrand ZFS Manager to ZFS Dashboard ([a297d8e](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/a297d8e1affdeef347b8a8a68249acaa0ff3a96c))
+* security hardening — sandbox pentest, supply-chain CI, SECURITY.md ([a0cc6a0](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/a0cc6a02dd5364ee7bc33712f5d1f4f17caad61d))
+
+
+### Bug Fixes
+
+* harden module capability API (sandbox-escape review follow-ups) ([229af60](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/229af60edfa5f6dacffb4561080fd17f9ea49e53))
+* prevent DateTime overflow panic in fill prediction ([4f963b5](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/4f963b5b232998b950c2ba4231c14d26a02a9972))
+* **security:** Node 20 (EOL) → Node 24 LTS + verwundbare Abhängigkeiten ([d85399c](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/d85399ca8ff33a6e5708ee1bbb0e512f8c9c0eba))
+* **security:** Node 20 (EOL) → Node 24 LTS, verwundbare Abhängigkeiten aktualisiert ([d293580](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/d29358061c8c8850bfc9d6515629670cd480bed8))
+
 ## [1.0.0](https://github.com/ZFS-Manager/ZFS-Manager/compare/v1.0.0...v1.0.0) (2026-07-27)
 
 
