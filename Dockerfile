@@ -1,5 +1,5 @@
 # ── Stage 1: Frontend build ──────────────────────────────────────────────────
-FROM node:22.12.0-alpine AS web-builder
+FROM node:24-alpine AS web-builder
 
 WORKDIR /app
 COPY web/package.json web/package-lock.json ./
