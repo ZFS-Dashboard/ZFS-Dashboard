@@ -4,6 +4,81 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0](https://github.com/ZFS-Dashboard/ZFS-Dashboard/compare/v1.0.0...v1.1.0) (2026-11-15)
+
+
+### Features
+
+* add Advanced Mode with File System and Database tools ([31d423d](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/31d423df82e843bb93afb7e216747e0436716be5))
+* add http-request host API and textarea config type ([e1fc5ca](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/e1fc5ca543f9c586a7215cc61394b7cd1d5351f9))
+* add immich example module, registry index, and module release CI ([19297ed](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/19297ede1a144bd88030d911c36ef23be708e1dc))
+* add sandboxed Wasm module system (runtime, API, scheduler) ([f2c7bb0](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/f2c7bb03c393e41bbc059a906eba08ed20abebdc))
+* auto-discover registry index from repo URL ([9a47fbf](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/9a47fbfac2f7198e5c7a369f726b6fc256bad5e0))
+* configurable GitHub update interval, cache-only page loads ([022fe75](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/022fe7501f89b4e322221ea916154c6bbd869cb7))
+* database browser now supports inline editing, insert, and delete ([0a13c28](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/0a13c28787c027cae3a608e6699f42764d1f664e))
+* fetch module versions from GitHub releases instead of index.json ([af0fb76](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/af0fb76ad00d4b9e0763e8f4eb8174ebd2247902))
+* GitHub token support for API auth and private repo modules ([a9dc831](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/a9dc831fabafa75366d690b5c4e5be19e37c0994))
+* introduce refinery migrations with module system schema ([96cfcfc](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/96cfcfc2baef8f85a3d66e842a457b17e83fd8f7))
+* make default module registry URL overridable via MODULE_REGISTRY_URL env ([ee37c27](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/ee37c27a467452ce15179c92309d5fa792f77d60))
+* merge frontend and backend into a single container ([3e03505](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/3e035050a93a5beb2cebe9f533eded0f3b829e64))
+* **modules:** add database selection (internal/external) to Active Modules ([d1e142c](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/d1e142c3372c0f084bba6d02088391d03ad90b7a))
+* **modules:** decouple immich module and add release version selection ([9cec1b4](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/9cec1b4867c45971716c5173d008912629f72b6e))
+* **modules:** fully dynamic metric auto-discovery without module hardcoding ([1773390](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/1773390c45d220050a8ba83d6fbcfb8bd85c695b))
+* **modules:** make database selection per-module instead of global ([d07fe11](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/d07fe112fc565c60929cd559ea0b455837fe9ba5))
+* new Modules tab, accent color picker, token save text fix ([20d2862](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/20d2862757059d9db5ba21fc5c6abbc3561cd915))
+* rebrand ZFS Manager to ZFS Dashboard ([a297d8e](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/a297d8e1affdeef347b8a8a68249acaa0ff3a96c))
+* Redis-backed GitHub API cache (6h TTL) for all GitHub calls ([e0c5945](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/e0c5945ffbe2d86aa2147e85cc7c385d0fb6e80f))
+* remove wasm_sha256 checksum verification ([7c6d670](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/7c6d670c32c036db878821d0b7ca11633cff89e4))
+* security hardening — sandbox pentest, supply-chain CI, SECURITY.md ([a0cc6a0](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/a0cc6a02dd5364ee7bc33712f5d1f4f17caad61d))
+* **store:** move version switcher to Module Store and remove from Active Modules ([77ca554](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/77ca554f7af9aa256d495c4fe6a9ba18c01fd59d))
+* validate required config fields before running modules ([d7d2d37](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/d7d2d3719ec3c8e3c4c12782b0c8d18fffe078fb))
+
+
+### Bug Fixes
+
+* accept "string" as valid config field type ([464a171](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/464a171ee7b8343c848b986c034adec0242f589e))
+* apply user-selected scrub schedule instead of default ([dc96ad3](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/dc96ad3ed5684ea1cddd9448545ca6d6c957916d))
+* auto-prepend https:// when no scheme is given for registry URLs ([bf9e237](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/bf9e237f349837f29a3694d479a278aa67763660))
+* **backend:** resolve Axum route collision for /api/v1/modules/:id/metrics ([e6fe5c6](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/e6fe5c6a726fdbcc1332703454c0d1d07dca724e))
+* cache GitHub release check for 1 hour to avoid rate limits ([d9b2b47](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/d9b2b4761ca61cf413e965634fd7ac06908665e9))
+* clean up custom tab widget placements on module uninstall ([9d264b7](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/9d264b7d2c52e321bd54234231930843d46a5689))
+* database browser crashes with ERR_EMPTY_RESPONSE ([4cb1eac](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/4cb1eac9ebba8b385647f364563be35c539fec54))
+* debug logging + fallback for private repo WASM download in switch_version ([e9d2452](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/e9d245261bcaafc120d2295d90225110165de1db))
+* ensure modules dir exists before writing wasm on version switch ([f56be67](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/f56be67e40941c597692888742ffa4a7a8aefffa))
+* harden module capability API (sandbox-escape review follow-ups) ([229af60](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/229af60edfa5f6dacffb4561080fd17f9ea49e53))
+* module run no longer fails on stale secrets blob ([b8c836b](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/b8c836bf9b54f3b102a1ec8aabb50b8c719915e4))
+* modules get 401 when calling dashboard API endpoints ([2544d83](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/2544d8312ce39f940b2448206d29a2c4b325ee0b))
+* **modules:** fix compilation errors in module_store and registry ([fefd865](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/fefd865e00904fd6b97a38340ce20aab90192431))
+* preserve GitHub auth header across redirects for private repo downloads ([909d0a0](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/909d0a05aa0f8cb08fc4517af1fd6890117ae256))
+* prevent DateTime overflow panic in fill prediction ([4f963b5](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/4f963b5b232998b950c2ba4231c14d26a02a9972))
+* private repo WASM download fails with 403 from GitHub API ([dea9a4f](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/dea9a4fc900dd4c4a3258c58da62bf6ba873c190))
+* proxy GitHub release check through backend to avoid rate limits ([9281ce2](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/9281ce25b0e8a797c5a1a016350a6a9a14ce5416))
+* refresh store UI after module update/switch ([e9511ba](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/e9511baa055cb32ec624234bfad5ef76c17e5ca2))
+* replace old default module registry on startup and strip quotes from ENV ([7199e54](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/7199e54b8d8cdc00410a73f61e974ab46ddb9117))
+* route all registry fetches through backend to avoid CORS errors ([c6abbab](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/c6abbab370c99904afbb029e1c69f60c78e348c0))
+* secrets master key always available — no more 500 on config save ([e52b444](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/e52b444836f2732ed65e2d4eefe00845b22e39b5))
+* **security:** bump wasmtime 47.0.2 → 47.0.3 to resolve RUSTSEC-2026-0222 and RUSTSEC-2026-0223 ([a64cb7f](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/a64cb7fcf219706c2a54e65c54b698992faa59b0))
+* **security:** bump wasmtime to 48.0.8 and patch vulnerable crates ([6bcaa4e](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/6bcaa4ea39c6a36d9bd2b58a91a25a2fcd7074fd))
+* **security:** Node 20 (EOL) → Node 24 LTS + verwundbare Abhängigkeiten ([d85399c](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/d85399ca8ff33a6e5708ee1bbb0e512f8c9c0eba))
+* **security:** Node 20 (EOL) → Node 24 LTS, verwundbare Abhängigkeiten aktualisiert ([d293580](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/d29358061c8c8850bfc9d6515629670cd480bed8))
+* **security:** relax Content-Security-Policy to allow external fonts and API connections ([e097f6e](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/e097f6e99a35cbf9d494bb212a345aea014b4211))
+* server crashes on startup due to Axum route conflict ([d2c6e07](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/d2c6e075b0fb1b0e203d7c133833b297800d4314))
+* store WASM artifacts in PostgreSQL, not just on disk ([19c34cf](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/19c34cf81f2aee2c80d5f1b6b56a376f85f24d13))
+* **store:** simplify registry error messages to friendly notice ([d757ee2](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/d757ee2d8f8cbd882d815fee9129ab49ef39b2da))
+* surface GitHub API errors during store refresh ([7070753](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/7070753af311b3eae51f7e526a749f7e569af1f6))
+* switch_version now updates actions and status_fields from new manifest ([1b41efc](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/1b41efc894ef1b4624e935f543b77bb2acbe7e99))
+* try main branch first, master only as fallback for registry discovery ([dd1e14d](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/dd1e14d634d1e1b6f8d8267e308f6a52018012f4))
+* use GitHub API asset endpoint for private repo WASM downloads ([1a83ef4](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/1a83ef4c7673d09a9e662904f6abc739f69d63f2))
+
+
+### Performance Improvements
+
+* cache accent color, defer backend sync, public GET ([a083360](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/a083360038fefaa0c436cdd5d828c11540c053cf))
+* parallelize registry fetching + add Redis timeouts ([7d38e5f](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/7d38e5f45a286fec3e4bf459cfe6fd52e0165d81))
+* parallelize store + registries fetch, cache registries in memory ([5871a5e](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/5871a5e0f1d52ee9feea845dca0d67af3bcbf7c7))
+* Redis caching for module store — fast page loads ([995eec4](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/995eec4126417c70d342d1102c70180c0c289476))
+* stop unnecessary API calls on every page load ([89fa4a7](https://github.com/ZFS-Dashboard/ZFS-Dashboard/commit/89fa4a7e2c7161322d96a09f7369ebd2a393d16e))
+
 ## [1.0.0](https://github.com/ZFS-Manager/ZFS-Manager/compare/v1.0.0...v1.0.0) (2026-07-27)
 
 
